@@ -24,7 +24,7 @@
 # Copyright (C) 2026, Teus Hagen, the Netherlands
 #
 
-VERSION=$(echo  '$Revision: 2.4 $ $Date: 2026/07/21 15:09:12 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 2.5 $ $Date: 2026/07/26 15:25:46 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
 
 # debug mode. Echo only the actions. Just for security
@@ -37,7 +37,7 @@ fi
 _RUNNING=                            # has progressbar running ID
 
 # Default list of containers is CONTAINERS
-DEFAULTS="mosquitto homeassistant wud go2rtc"
+DEFAULTS="mosquitto zigbee2mqtt homeassistant wud go2rtc"
 # home directory of containers. Directory where all docker conatiners reside and user homes
 DOCKERDIR=/home/containers           # docker containers homes directory
 # operational mode of operating e.g. purge or delete container(s), install or update container(s)
@@ -640,6 +640,7 @@ function CREATE_USER(){
              fi
              # add user with gid to system accounts, disabled login
              # add user will set subuid and set subgid in container name space
+	     ${SUDO:-sudo} mkdir -p "${DOCKERS[$CNTR,HOME]}"
              if ! ${SUDO:-sudo} adduser \
                           --disabled-password --disabled-login \
                           --stdoutmsglevel=warn \
@@ -1078,21 +1079,24 @@ function INSTALL_DOCKER(){
     
     if [ -n "$DOCKERdotCOM" ] # install using docker.com Linux install script
     then
+        MESSAGE NOTICE "Install docker from get.docker.com. Can take a while..."
+        # disadvantage: docker will not be updated automatically
+	STARTbar
         curl -sSL https://get.docker.com >${TMP_DIR}/install
         if [ -n "${DEBUG}" ]
         then
             MESSAGE DEBUG "Dry run docker installation:"
             ${SUDO:-sudo} bash ${TMP_DIR}/install --dry-run
         else
-            MESSAGE NOTICE "Install docker from get.docker.com."
-            # disadvantage: docker will not be updated automatically
             if ! ${SUDO:-sudo} bash ${TMP_DIR}/install 2>&1 >$TMP_DIR/msg
             then
                  ERRORS msg    # save errors messages
                  MESSAGE ALERT "Docker installation failed.\nSee logging ${TMP_DIR}."
+		 STOPbar "Failure installing docker."
                  exit 1
             fi
         fi
+	STOPbar "Installed docker core."
         rm -f ${TMP_DIR}/{msg,install}
     else
         MESSAGE NOTICE "Installation of docker container service apps: ${DOCKER_APPS}."
@@ -1161,7 +1165,7 @@ function INSTALL_MOSQUITTO() {
         MESSAGE ERROR "Failed to install system service $SRVR."
         ERRORS mosquitto
     fi
-    STOPbar "Install ${Blue}mosquitto${Reset}"
+    STOPbar "Install ${Blue}mosquitto${Reset}."
     rm -f ${TMP_DIR}/mosquitto
 
     if ! which /usr/bin/mosquitto_sub >/dev/null 2>/dev/null
@@ -1181,13 +1185,14 @@ function INSTALL_MOSQUITTO() {
     ${SUDO:-sudo} systemctl --quiet enable mosquitto 2>/dev/null
 
     # authentication of subscribers and publishing clients
-    MESSAGE NOTICE "For security:\n    add USER to mosquitto: sudo mosquitto_passwd -c /etc/mosquitto/pwfile USER"
-    if [ -n "${MQTT_USER/*:/}" ]
+    if [ -n "${MQTT_USER/:*/}" ]
     then
-         MESSAGE NOTICE "Change user/pwd mosquitto with 'man mosquitto_passwd' (/etc/mosquitto/pwdfile)"
-         local NEW=
-         if [ -f /etc/mosquitto/pwdfile ] ; then NEW=-c ; fi
-         ${SUDO:-sudo} mosquitto_passwd -b ${NEW} /etc/mosquitto/pwdfile "${MQTT_USER/:*/}" "${MQTT_USER/*:/}"
+        MESSAGE NOTICE "Change user/pwd mosquitto with 'man mosquitto_passwd' (/etc/mosquitto/pwdfile)"
+        local NEW=
+        if [ -f /etc/mosquitto/pwdfile ] ; then NEW=-c ; fi
+        ${SUDO:-sudo} mosquitto_passwd -b ${NEW} /etc/mosquitto/pwdfile "${MQTT_USER/:*/}" "${MQTT_USER/*:/}"
+    else
+        MESSAGE NOTICE "For security:\n    add USER to mosquitto: sudo mosquitto_passwd -c /etc/mosquitto/pwfile USER"
     fi
     local ANONIMOUS=true
     if echo "${MQTT_CLIENT}" | grep -q ':' && [ -z "${MQTT_CLIENT/*:/}" ] # false if password is defined?
@@ -1200,6 +1205,9 @@ function INSTALL_MOSQUITTO() {
             fi
         fi
     fi
+    # Another mosquitto service is running? E.g. multiple zigbee2mqtt services.
+    # One may need to add bridge modus in the config file.
+    # Or mqtt filter service in the config file!
     MESSAGE INFO "MQTT client access anonimous is '$ANONIMOUS'."
     MESSAGE NOTICE "Configuring MQTT file for HAS: ${MQTT_CONF}."
     ${SUDU:-sudo} touch ${MQTT_CONF}
@@ -1970,28 +1978,32 @@ CONTAINERS=            # unordered list of services/containers to install
 DEAMONS=
 function ADD_ITEM() {
    local RTS=1 ITEM=${1,,} TYPE
-   if [ -n "$2" ] ; then TYPE=" ($2 depends on it)" ; fi
-   if echo ${CONTAINERS} ${SERVERS} | grep -q "^${ITEM}$" ; then return 0 ; fi  # already added
+   if [ -n "$2" ] ; then TYPE=" (e.g. $2 depends on it)" ; fi
+   if echo ${CONTAINERS} ${DEAMONS} | grep -q "^${ITEM}$" ; then return 0 ; fi  # already added
    # is it a supported docker container?
    if echo ${!DOCKERS[@]} | awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort | uniq | grep -q "^${ITEM}$"
    then
        if ! systemctl --quiet is-active docker         # is docker installed and running?
        then
            ADD_ITEM docker ${ITEM}
-       fi   
-       if ${SUDO}docker ps --format '{{.Names}}' | grep -q "${ITEM}"
-       then
-           MESSAGE DEBUG "Docker container ${ITEM}${TYPE} is ${Black}already installed and running${Reset}."
-           if [ -n "$TYPE" ] ; then return 0 ; fi
-       elif ${SUDO}docker inspect "${DOCKERS[${ITEM},IMAGE]:-None}" 2>/dev/null >/dev/null
-       then
-           MESSAGE DEBUG "Docker container ${ITEM}${TYPE} ${Black}image is installed${Reset} but ${Red}not active${Reset}."
-           if [ -n "$TYPE" ] ; then return 0 ; fi
+       else   
+           if ${SUDO}docker ps --format '{{.Names}}' | grep -q "${ITEM}"
+           then
+               MESSAGE DEBUG "Docker container ${ITEM}${TYPE} is ${Black}already installed and running${Reset}."
+               if [ -n "$TYPE" ] ; then return 0 ; fi
+           elif ${SUDO}docker inspect "${DOCKERS[${ITEM},IMAGE]:-None}" 2>/dev/null >/dev/null
+           then
+               MESSAGE DEBUG "Docker container ${ITEM}${TYPE} ${Black}image is installed${Reset} but ${Red}not active${Reset}."
+               if [ -n "$TYPE" ] ; then return 0 ; fi
+           fi
        fi
-       MESSAGE NOTICE "Adding docker container '${ITEM}'${TYPE}."
-       CONTAINERS+="
+       if ! echo $CONTAINERS | grep -q ${ITEM}
+       then
+           MESSAGE NOTICE "Adding docker container '${ITEM}'${TYPE}."
+           CONTAINERS+="
 ${ITEM}"
-       CHK_DEPENDANT "${ITEM}"
+           CHK_DEPENDANT "${ITEM}"
+       fi
        RTS=
    fi
    # is it a supported system service?
@@ -2002,10 +2014,13 @@ ${ITEM}"
            MESSAGE DEBUG "System service ${ITEM}${TYPE} is already installed and running. Skipped."
            return 0                                    # already installed and running
        fi
-       MESSAGE NOTICE "Adding system service '${ITEM}'${TYPE}."
-       DEAMONS+="
+       if ! echo ${DEAMONS} | grep -q ${ITEM}
+       then
+           MESSAGE NOTICE "Adding system service '${ITEM}'${TYPE}."
+           DEAMONS+="
 ${ITEM}"
-       CHK_DEPENDANT "${ITEM}"
+           CHK_DEPENDANT "${ITEM}"
+       fi
        RTS=
    fi
    if [ -n "$RTS" ]
@@ -2088,7 +2103,7 @@ do
             done
             break
         ;;
-        default)                                    # install or update defaults
+        default*)                                    # install or update defaults
             # initialisation variables
             for ITEM in ${DEFAULTS}                 # add defaults
             do
@@ -2112,7 +2127,7 @@ declare -i RTS=0
 
 if [ -n "${DEAMONS}" ]                                # install/update first the deamons
 then
-    MESSAGE INFO "Installing system service(s): ${DEAMONS}."
+	MESSAGE INFO "Installing system service(s): $(echo ${DEAMONS})."
     for ITEM in ${DEAMONS}                            # ****** system service handling
     do
        if ! ADD_SERVICE "$ITEM"
@@ -2129,7 +2144,7 @@ then
     then
         SUDO=                     # docker is running and docker group is added for $USER
     fi
-    MESSAGE INFO "Installing docker container(s): ${CONTAINERS}."
+    MESSAGE INFO "Installing docker container(s): $(echo ${CONTAINERS})."
     for ITEM in ${CONTAINERS}                         # ****** docker containers handling
     do
        if ! ADD_CONTAINER "${ITEM,,}"
