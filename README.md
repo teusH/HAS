@@ -43,22 +43,16 @@ Optional arguments:
  Will show actions and help when installing *name*.<br/>
  Before installing containers or services first use *help service/container*.
 
-*dump [arg1 ...]* Create a 'tar' dump of container data directory.<br/>
+*dump container name ...* Create a 'tar' dump of container data directory.<br/>
  Store the data in /home/containers/backups directory for each installed container.<br/>
  Dumps older as a month will be deleted when new data is found.<br/>
- Default: make a dump of all installed container data.
-     
-  How to restore: remove container and image:<br/>
-     - *docker stop container_name*<br/>
-     - use script with install container<br/>
-     - *docker stop container<br/>
-     - *sudo untar (option xpvf) container tar-dump* in /home/containers/conainer_name ditectory<br/>
-     - *docker start container_name*
+ Default: make a dump of all installed container data. <br/>
+ Hint: save the dumps on a separate filesystem! To do: encrypt the archive.
+ 
+*restore container name ... * Restore a (compressed) container dump file or config file.
          
-     If setup.sh is available or command option *help container* from script looks ok,
-     one can rm with docker CLI the container and use docker run or compose to start container.<br/>
-     To Do: add the latter to the script with 'restore' command.<br/>
-     Hint: save the dumps on a separate filesystem! To do: encrypt the archive.
+If setup.sh is available or command option *help container* from script looks ok,
+one can rm with docker CLI the container and use docker run or compose to start container.<br/>
 
 Some operations need super user 'root' permission (using --privileged as option).
 If super user password is needed the script will ask via 'sudo' for the 'root' password.
