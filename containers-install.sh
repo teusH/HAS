@@ -24,7 +24,7 @@
 # Copyright (C) 2026, Teus Hagen, the Netherlands
 #
 
-VERSION=$(echo  '$Revision: 2.5 $ $Date: 2026/07/26 15:25:46 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.1 $ $Date: 2026/07/29 15:43:23 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
 
 # debug mode. Echo only the actions. Just for security
@@ -39,26 +39,34 @@ _RUNNING=                            # has progressbar running ID
 # Default list of containers is CONTAINERS
 DEFAULTS="mosquitto zigbee2mqtt homeassistant wud go2rtc"
 # home directory of containers. Directory where all docker conatiners reside and user homes
+# DOCKERDIR=/opt                     # usual default for docker containers
 DOCKERDIR=/home/containers           # docker containers homes directory
+# backup directory. Suggest to use remote NAS or autofs to remote disk
+BACKUP_DIR=${DOCKERDIR}/backups
+# containers to be restored          used via the restore script option
+declare -A RESTORE
 # operational mode of operating e.g. purge or delete container(s), install or update container(s)
 # will purge docker if no container images are found
 MODE=UPDATE
 VERBOSE=/dev/stderr                  # channel for messages. Default on /dev/stderr
+# keep track of installed services and docker containers
+declare -A INSTALLED
 # docker interactions via sudo or via dockers group permission SUDO is empty
 SUDO='sudo '  # default via sudo command
-if grep -q "^docker:.*${USER}" /etc/group
+if groups | grep -q " docker "       # docker CLI command works for this USER
 then
     SUDO=
 fi
 # installion logging file 
 TMP_DIR=$(mktemp -d /var/tmp/DocInst_XXXXXXXXXX) # directory for temporary files
+
 # collect error messages
 function ERRORS() {
     local F=${1//*\//}
     if [ -z "$F" ] ; then return 0 ; fi
     if [ "$F" != errors ] && [ -s ${TMP_DIR}/"$F" ]
     then
-        cat ${TMP_DIR}/"$F" >> {TMP_DIR}/errors
+        cat ${TMP_DIR}/"$F" >> ${TMP_DIR}/errors
         rm -f ${TMP_DIR}/"$F"
     fi
     return 0
@@ -162,7 +170,6 @@ function MESSAGE () {
 }
 
 # ***********************************************************************
-
 # ******* docker images and container CONFIGURATION definitions *********
 # ***********************************************************************
 # docker container configuration: docker image, name and directory
@@ -873,6 +880,39 @@ function CMD_RUN_CNTR() {
 # ##################################################################
 # ################ HELP ############################################
 # #################################################################
+# help dump, restore container backups
+function BACKUP_HELP() {
+    echo -e "
+To dump container data use: '$CMD dump container_name ...'.
+To restore container data use: '$CMD restore container_name ...'.
+Docker local container data will be stored in an unencrypted (!) compress datafile in the directory $BACKUP_DIR in the subdirectory container_name.
+Dump files exceeding 3 tar-files and older as one month and will be removed.
+Suggested is to store e.g. via autofs and SMB-archive on a remote (NAS) filesystem.
+In this way the dumps arrive automatically on a remote (NAS) filesystem.
+Install autofs: 'sudo apt install autofs ; sudo systemsctl enable autofs'.
+Add file: 'echo \"${BACKUP_DIR} -fstype=cifs,rw,username=USER,password=USER_SECRET_PHRASE,dir_mode=0777,file_mode=0777 ://NAS_HOST/has_system\" | sudo tee /etc/auto.smb.shares'.
+Append smb share: 'echo \"/- /etc/auto.smb.shares --timeout 15 browse\" | sudo tee -a /etc/auto.master'
+and 'sudo systemctl restart autofs'.
+Add on NAS system in file /etc/samba/smb.conf:
+'
+# autofs on /dev/smbXYZ
+[has_system]
+    path = /extra/HAS
+    comment = containers homeassistant and zigbee2mqtt backup data
+    read only = no
+    browseable = no
+    force create mode = 0660
+    force directory mode = 2770
+    valid users = @USER
+    '
+and restart smbd on the NAS.
+Remember homeassistant has encrypted (tar) backups in home subdirectory 'backups'. Make sure to save the encryption key.
+Optionally homeassistant will create unencrypted dumps.
+Homeassistant new install will allow to restore the archived data on startup in the initial WebGui page.
+"
+
+}
+
 # help information on stdout
 function HELP(){
     local CNTRS=$(echo ${!DOCKERS[@]} | sed 's/,[A-Z][A-Z]*//g' | \
@@ -907,35 +947,36 @@ The container will be created via the 'docker run args ... image' (detached/alwa
 'service' either mosquitto or docker will do a system service installation.
 
 Command arguments configuration examples:
-${Blue}$0 default${Reset}
+${Blue}$CMD defaults${Reset}
      Runs with default container/image and service set.
      Default containers or services are: ${DEFAULTS// /, }.
+
 ${Blue}$0${Reset} ${Red}delete${Reset} ${Blue}[container|service ...]${Reset}
 ${Blue}$0${Reset} ${Red}purge${Reset} ${Blue}[container|service ...]${Reset}
      Will stop, remove, delete container(s) and image(s).
      'purge' will not remove local stored data in home directory. 'delete' removes local data.
      If container name is 'docker' the docker app also will be removed from system.
 
-${Blue}$0 help${Reset} ${Black}name${Reset}
+${Blue}$0 help${Reset} ${Black}container_name${Reset}
      Will show actions and help when installing '${Black}name${Reset}'.
      Before installing containers or services first use 'help service/container'.
 
-'${Black}dump [arg1 ...]${Reset}' Create a 'tar' dump of container data directory.
-     Store the data in $DOCKERDIR/backups directory for each installed container.
-     Dumps older as a month will be deleted when new data is found.
+${Black}dump container_name ...${Reset} Create a 'tar' dump of container data directory.
+     Store the data in ${BACKUP_DIR} directory for each installed container.
+     Amount of dumps is limited to 3. First in, first removed.
      Default: make a dump of all installed container data.
-     How to restore: remove container and image:
-         docker stop container_name
-         use script with install container
-         docker stop container
-	 sudo untar (option xpvf) container tar-dump in $DOCKERDIR/conainer_name ditectory
-         docker start container_name
-     If setup.sh is availavle or 'help container' from script is ok,
+     If setup.sh is available or 'help container' from script is ok,
      one can rm with docker CLI the container and use docker run or compose to start container.
-     To Do: add the latter to the script with 'restore' command.
      Hint: save the dumps on a separate filesystem! To do: encrypt the archive.
 
-     Some operations need super user 'root' permission (using --privileged as option).
+${Black}restore container_name ...${Reset} Restore a container from tar dump archive.
+     Search and interact on available archived or user provided dump/config file
+     for the docker container with container_name.
+     Will pull latest image, unroll dump, and restart container.
+     If setup-sh in archived dump is available use the the setup script. Setup script
+     will prefer to start the container via compose.yaml file.
+
+Some operations need super user 'root' permission (using --privileged as option).
 If super user password is needed the script will ask via 'sudo' for the 'root' password. Once the pasword is entered the script will reuse the provide root permission via 'sudo'.
 
 The script will install automatically dependent system service(s) or containers when needed so.
@@ -946,11 +987,11 @@ one does not need to run this script for image version updates.
 
 ${Black}Advise${Reset}:
 Before installing a docker container one is advised to obtain some preparation information.
-E.g. use the command '${Black}$0 help ${Blue}container_name${Reset}'.
+E.g. use the command '${Black}$CMD help ${Blue}container_name${Reset}'.
 
 An alternative is to use Portainer docker container to create,
 add/delete configuration items to the container, stop and restart, update docker containers.
-And use '${Black}help containerNAME${Reset}' to give hints for the container configuration items. 
+And use '${Black}help container_name${Reset}' to give hints for the container configuration items. 
 Portainer is however more complex to manage.
 
 The script will use preconfigured installation. See DOCKER array variable definitions to change them if needed.
@@ -989,16 +1030,22 @@ ${Black}TO DO${Reset}:
     fi
     for CNTR in $@
     do
-        if [ "${CNTR,,}" = defaults ]
-        then
-             HELP $DEFAULTS
-             continue
-        fi 
         if [ -z "${CNTR/#-*/}" ]
         then
             echo "Option $CNTR is an option? Skipped."
             continue
         fi
+        if [ "${CNTR,,}" = defaults ]
+        then
+             HELP $DEFAULTS
+             continue
+        fi 
+	if echo " backup dump restore " | grep -q "${CNTR}"
+        then
+	     BACKUP_HELP
+	     continue
+	fi
+	#  HELP container_name
         if echo $CNTRS | grep -q "${CNTR}"
         then
             if systemctl --quiet is-active docker
@@ -1261,47 +1308,72 @@ function ADD_SERVICE(){
     ;;
     esac
 
+    STATUS=1
     case $SRVR in
     docker)
         INSTALL_DOCKER
-        return $?
+        STATUS=$?
     ;;
     mosquitto)
         INSTALL_MOSQUITTO
-        return $?
+        STATUS=$?
     ;;
     esac
-    MESSAGE ERROR "Unknown system service '$SRVR'. Skipped."
+    if (( $STATUS = 0 ))
+    then
+        INSTALLED[${SRVR}]="${Green}Installed system service $SRVR${Reset}."
+	if [ ${SRVR} = mosquitto ]
+	then
+	    INSTALLED[${SRVR}]+=" Port $MQTT_PORT."
+	fi
+    else
+        MESSAGE ERROR "Unknown system service '$SRVR'. Skipped."
+	INSTALLED[${SRVR}]="${Red}Failed to install container $SRVR${Reset}."
+    fi
     return 1
 }
  
 # import (pull) Home Assistant docker container image. Arg: container name.
-# returns: 3 (CRITICAL:no image), 2 (CRITiCAL:failed import), 1 (upto date), 
 function GET_IMAGE(){
     local IMG=0
+    declare -i CNT=0
     if ${SUDO}docker images | grep -q "${1}"
     then                                 # some image is already imported
         IMG=1
     fi
     MESSAGE DEBUG "Check and get latest container '${1}' image '${DOCKERS[${1},IMAGE]}'.\nThis takes some while..."
-    # check if there is an update. Return 1 if image was up to date.
-    STARTbar
-    if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" >${TMP_DIR}/pull
+    # some container repros fail first time, but are succefull second trial. E.g. go2rtc pull image.
+    # check if there is an update.
+    # Return 0 on success, return 1 if image is already existant.
+    # Return 2 if image was up to date. Return 4 on failure. Return 3 on image inspect error.
+    for (( CNT=0; CNT < 2; CNT++ ))
+    do
+        STARTbar
+        if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" >${TMP_DIR}/pull
+        then                  # some repros e.g. go2rtc have caching problems. Try again.
+            STOPbar "${Red}Pull image ${DOCKERS[${1},IMAGE]}${Reset}"
+	    MESSAGE WARN "Failed to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again."
+	    sleep 15
+            ERRORS pull
+	    rm -f ${TMP_DIR}/pull
+	else
+	    STOPbar "${Green}Pulled image ${DOCKERS[${1},IMAGE]}${Reset}"
+            break
+	fi
+    done
+    if ! [ -f ${TMP_DIR}/pull ]
     then
-        STOPbar "${Red}Pull image ${DOCKERS[${1},IMAGE]}${Reset}"
-        ERRORS pull
         MESSAGE WARN "Failed to pull image ${DOCKERS[${1},IMAGE]}. Unknown image?"
         return 4
-    elif grep -q 'up to date' ${TMP_DIR}/pull
+    fi
+    if grep -q 'up to date' ${TMP_DIR}/pull
     then
-        STOPbar  "${Blue}Pull image ${DOCKERS[${1}${Reset},IMAGE]}"
         rm -f ${TMP_DIR}/pull
         if ${SUDO}docker ps --format '{{.Names}}' | grep -q '${1}'  # is container running?
         then
             return 2        # still running fine
         fi
     else
-        STOPbar  "${Blue}Pull image ${DOCKERS[${1}${Reset},IMAGE]}"
         rm -f ${TMP_DIR}/pull
     fi
     # check if image is uploaded and installed as image
@@ -1337,7 +1409,7 @@ function GET_BACKUP(){
 	done
 	return $RTS
     fi
-    # 
+    #  may need to encrypt backup data
     for CNTR in $@
     do
         BDIR=$(${SUDO:-sudo} ls ${DOCKERS[${CNTR},HOME]:-not_available} 2>/dev/null)
@@ -1348,15 +1420,22 @@ function GET_BACKUP(){
         else
              BDIR=$BDIR
         fi
-        if [ ! -d "$DOCKERDIR/backups/${CNTR}" ]
+	declare -i CNT=0
+        if [ ! -d "${BACKUP_DIR}/${CNTR}" ]
         then
-            ${SUDO:-sudo} mkdir -p "$DOCKERDIR/backups/${CNTR}"
-        else
-            MESSAGE INFO "Removing backups for '${CNTR}' older as one month."
-	    ${SUDO:-sudo} find "$DOCKERDIR/backups/${CNTR}" -name 'Backup*.tgz' -a -mtime +35 -a -exec rm -f '{}' ';'
+            ${SUDO:-sudo} mkdir -p "${BACKUP_DIR}/${CNTR}"
+	else
+	    CNT=$(${SUDO:-sudo} find "${BACKUP_DIR}/${CNTR}" -maxdepth 1 -name 'Backup*.tgz' | wc -l) 
+            if (( ${CNT:-0} > 3 ))
+	    then                          # retain some, remove oldest, but retain 3 files
+	        CNT-=3
+	        CNT=$(${SUDO:-sudo} find "${BACKUP_DIR}/${CNTR}" -maxdepth -name 'Backup*.tgz' -print '%T+ %p\n' | sort | cut -f 2 -d ' ' | head -n $CNT )
+		MESSAGE INFO "Removing backups ($CNT) of docker container '${CNTR}'."
+		rm -f ${CNT}
+	    fi
         fi
         MESSAGE INFO "Available backups for '${CNTR}', data: ${BDIR// /, }."
-        local FBACKUP="${DOCKERDIR}/backups/${CNTR}/Backup-$(date +%Y-%m-%dH%H).tgz"
+        local FBACKUP="${BACKUP_DIR}/${CNTR}/Backup-$(date +%Y-%m-%dH%H).tgz"
         MESSAGE NOTICE "Pause and backing up container data ${CNTR} HOME to '${Blue}$FBACKUP${Reset}'."
 	# ${SUDO}docker ${CNTR} stop ; ${SUDO}docker ${CNTR} wait
 	${SUDO}docker ${CNTR} pause   # better to stop and missing events? 
@@ -1689,6 +1768,71 @@ function CONFIG_CHECK(){
     esac
     return 0
 }
+
+# restore docker container
+# get file with archived local container data from dump directory or user input
+# arg1: container_name, ADD_CONAINER function will use this data
+# collect into RESTORE[container_name]=archived_file
+function GET_RESTORE_DATA() {
+   local CNTR={1:-None} ANSWER
+   declare -a FILE
+   declare -i CNT=0
+   if ! echo ${!DOCKERS[@]} | awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort -r | uniq | grep -q "^${CNTR}$"
+   then
+       MESSAGE ERROR "Unknown docker container $CNTR. Skipped."
+       return 1
+   fi
+
+   if [ -d "${BACKUP_DIR}/${CNTR}" ]
+   then                              # time sorted array of available archived data
+       FILE=($(${SUDO:-sudo} find "${BACKUP_DIR}/${CNTR}" -maxdepth -name 'Backup*.tgz' -print '%T+ %p\n' | sort | cut -d ' ' -f 2))
+   fi
+   if (( ${#FILE[@]} > 0 ))
+   then
+       echo -e "Found in "${BACKUP_DIR}/${CNTR}" ${#FILE[@]} backups (youngest first):" >$VERBOSE
+       for (( CNT=0; CNT < ${#FILE[@]} ; CNT++ ))
+       do
+           echo -e "${Red}$CNT${Reset}\t${FILE[$CNT]}" >$VERBOSE
+       done
+       read -p "Enter which number? ${#FILE[@]} or enter path/filename or leave it blank (none): " -t 30 ANSWER
+   fi
+   if [ -n "$ANSWER" ]
+   then
+       RESTORE[$CNTR]=${FILE[$ANSWER]}
+   else
+       read -p "Enter your backup file (compressed) tar file: " -t 30 ANSWER
+       if [ -z "$ANSWER" ] ; then return 1 ; fi
+       if ${SUDO:-sudo} file -z "${ANSWER:-NoNe}" | grep -q 'POSIX tar'
+       then
+           RESTORE[$CNTR]="$ANSWER"
+           return 0
+       fi
+   fi
+   MESSAGE WARN "Unable to locate archived tar dump file for contaner $CNTR."
+   return 1
+}
+
+# restore archived or config data for a docker container
+function RESTORE_DATA() {
+    local CNTR=${1,,} FILE=${RESTORE[${CNTR}]}
+    if [ -z "$FILE" ] ; then return 0 ; fi
+    STOP_CONTAINER ${CNTR}
+    Z=$(${SUDO:-sudo} file -z ${FILE})
+    if ! echo "$Z" | grep -q "POSIX tar"  # wonder how this can be generalized
+    then
+	MESSAGE ERROR "Provided container archive file $FILE format not supported."
+	return 1
+    fi
+    ${SUDO}docker rm ${CNTR}
+    if ! ${SUDO:-sudo} tar --directory="${DOCKERS[${CNTR},HOME]}" ${DEBUG/*/-tv} -xf $FILE
+    then
+	MESSAGE WARN "Unable to retrieve archived file $FILE for container $CNTR. Restart container."
+	${SUDO}docker restart $CNTR
+	return 1
+    fi
+    MESSAGE WARN "Installed archived or config file $FILE for container ${CNTR}."
+    return 0
+}
                    
 # ############################################################
 # ##############   ADD CONTAINER container_name  #############
@@ -1784,15 +1928,21 @@ function ADD_CONTAINER(){
         # in case someone else is using the web port
 	if LISTENING ${PRT}
 	then
-	    MESSAGE WARN "Check it. Is docker container '${CNTR}' with webGUI listening on port '${PRT}'?"
-	    MESSAGE WARN "$(ss -HlpT 'sport = :${PRT}')\nFor now we just try restart the container '${CNTR}'."
-            MESSAGE WARN "Just restarting container '${CNTR}'."
-            ${SUDO}docker restart "${CNTR}"
-	    return 0
-	else
-            PRTS+=" $PRT"
-        fi
+	    if [ -z "${RESTORE[${CNTR}]}" ]       # container needs to be restored
+            then
+	        MESSAGE WARN "Check it. Is docker container '${CNTR}' with webGUI listening on port '${PRT}'?"
+	        MESSAGE WARN "$(ss -HlpT 'sport = :${PRT}')\nFor now we just try restart the container '${CNTR}'."
+                MESSAGE WARN "Will just restarting container '${CNTR}'."
+                ${SUDO}docker restart "${CNTR}"
+	        return 0
+	    fi
+	fi
+        PRTS+=" $PRT"
     done
+    if [ -n "${RESTORE[${CNTR}]}" ]
+    then
+	RESTORE_DATA ${CNTR}
+    fi
 
     # configure zigbee2mqtt configuration.yaml for operational container and webGUI
     if ! CONFIG_CHECK ${CNTR:-None}
@@ -1902,6 +2052,12 @@ EOF
 	PRT="super user ${Red}root${Reset}"
     fi
     MESSAGE NOTICE "Container runs with effective user: ${PRT:-${Blue}anonymous${Reset}}."
+    if (( $STATUS = 0 ))
+    then
+        INSTALLED[${CNTR}]="${Green}Installed container $CNTR${Reset}, effective user ${PRT:-anonymous}, ports ${PRTS:- None}."
+    else
+	INSTALLED[${CNTR}]="${Red}Failed to install container $CNTR${Reset}."
+    fi
     return $STATUS
 }
 
@@ -2066,7 +2222,7 @@ do
             exit 1
         fi
         shift
-    elif [ "${1^^}" = dump ]               # create a tar dump of a container data
+    elif [ "${1,,}" = dump ]               # create a tar dump of a container data
     then
 	shift
 	if ! GET_DUMP $@
@@ -2079,6 +2235,7 @@ do
         break
     fi
 done
+
 if [ -z "$1" ]   # no action, publish help info
 then
     HELP
@@ -2103,6 +2260,22 @@ do
             done
             break
         ;;
+        restore)
+	    shift
+	    while [ -n "${1,,}" ]
+	    do
+	        if [ -n "${1,,}" ]
+                then
+		     if ! GET_RESTORE_DATA "${1,,}"
+		     then
+			 MESSAGE ERROR "Unable to find backup data file or not supported container ${1,,}. Skipped."
+		     else
+			 ADD_ITEM ${1,,}
+		     fi
+		fi
+		shift
+	    done
+	;;
         default*)                                    # install or update defaults
             # initialisation variables
             for ITEM in ${DEFAULTS}                 # add defaults
@@ -2156,6 +2329,14 @@ then
 fi
 
 # ready, work done
+if (( "${#INSTALLED[@]}" > 0 ))
+then
+    MESSAGE NOTICE "Installation overview:"
+    for ITEM in ${!INSTALLED[*]}
+    do
+       MESSAGE WARN "${INSTALLED[$ITEM]}"
+    done
+fi
 if (( $RTS > 0 ))
 then
     MESSAGE ERROR "Unable to install/update one of $RTS services and docker containers."
