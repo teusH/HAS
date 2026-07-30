@@ -2052,7 +2052,7 @@ EOF
 	PRT="super user ${Red}root${Reset}"
     fi
     MESSAGE NOTICE "Container runs with effective user: ${PRT:-${Blue}anonymous${Reset}}."
-    if (( $STATUS = 0 ))
+    if (( $STATUS == 0 ))
     then
         INSTALLED[${CNTR}]="${Green}Installed container $CNTR${Reset}, effective user ${PRT:-anonymous}, ports ${PRTS:- None}."
     else
