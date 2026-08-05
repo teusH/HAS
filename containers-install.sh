@@ -24,7 +24,7 @@
 # Copyright (C) 2026, Teus Hagen, the Netherlands
 #
 
-VERSION=$(echo  '$Revision: 3.1 $ $Date: 2026/07/29 15:43:23 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.2 $ $Date: 2026/08/05 20:17:57 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
 
 # debug mode. Echo only the actions. Just for security
@@ -40,10 +40,10 @@ _RUNNING=                            # has progressbar running ID
 DEFAULTS="mosquitto zigbee2mqtt homeassistant wud go2rtc"
 # home directory of containers. Directory where all docker conatiners reside and user homes
 # DOCKERDIR=/opt                     # usual default for docker containers
-DOCKERDIR=/home/containers           # docker containers homes directory
+DOCKERDIR=/opt/containers            # docker containers homes directory
 # backup directory. Suggest to use remote NAS or autofs to remote disk
 BACKUP_DIR=${DOCKERDIR}/backups
-# containers to be restored          used via the restore script option
+# containers to be restored          # used via the restore script option
 declare -A RESTORE
 # operational mode of operating e.g. purge or delete container(s), install or update container(s)
 # will purge docker if no container images are found
@@ -125,18 +125,20 @@ trap cleanup_failure INT
 
 # info and logging handler, be verbose of what is going on
 declare -A LEVEL                                  # information level for messages
-LEVEL[EMERGE]=7
+LEVEL[EMERG]=7
 LEVEL[ALERT]=6
-LEVEL[CRITICAL]=5
-LEVEL[ERROR]=4
-LEVEL[WARN]=3
+LEVEL[CRIT]=5
+LEVEL[ERR]=4
+LEVEL[WARNING]=3
 LEVEL[NOTICE]=2
 LEVEL[INFO]=1                                     # default
 LEVEL[DEBUG]=0
 LEVEL[ALL]=0
-LEVEL[QUIET]=4                                    # errors and higher level
+LEVEL[QUIET]=3                                    # errors and higher level
+# messages: arg1 level
 function MESSAGE () {
-    local STR=${2:-$1} L=$1
+    [ -n "$2" ] || [ -n "$1" ] || return 0        # skip empty messages
+    local STR=${2} L=$1
     if [ -z "$2" ] ; then L=ALL ; fi
     case ${LEVEL[${L^^}]:-None} in                # set color level and message
         6|7) L=${Bold}${Purple}${L^^}${Reset} ; STR="${Purple}${STR}${Reset}"
@@ -162,7 +164,7 @@ function MESSAGE () {
        echo -e "${L}: $STR" >>${VERBOSE}
     fi
     # stop if level is equal or higher as critical level
-    if (( ${LEVEL[$1]:-1} >= ${LEVEL[CRITICAL]:-5} ))   # level of critical messages
+    if (( ${LEVEL[$1]:-1} >= ${LEVEL[CRIT]:-5} )) # level of critical messages
     then
        echo "${Red}EXITING${Reset}." >>${VERBOSE}
        exit 1
@@ -181,9 +183,9 @@ DEFAULT_OPTIONS="
     --volume=/etc/localtime:/etc/localtime:ro
     --volume=/var/run/docker.sock:/var/run/docker.sock"
 # container installation definitions should be in a sort of library database
-declare -A DOCKERS                 # array with container installation details
+declare -A DOCKERS                                # array with container installation details
 
-HOSTIP=                            # server ip address for container webUI access
+HOSTIP=                                           # server ip address for container webUI access
 function HOSTIP() {
    if [ -n "$HOSTIP" ] ; then echo "$HOSTIP" ; return 0 ; fi
    HOSTIP=$(ifconfig | awk '/inet 1[09]/{ print $2; }' | sort -r | head -1)
@@ -196,22 +198,29 @@ function HOSTIP() {
 }
 HOSTIP
 
+declare -i _TIMING=0
 # show progress bar when notice level below N
-function STOPbar() {                  # stop progress bar
+function STOPbar() {                              # stop progress bar
     if [ -n "$_RUNNING" ]
     then
         kill $_RUNNING
         echo -e "\r${1} DONE     " >>$VERBOSE
     fi
     _RUNNING=
+    if (( _TIMING > 0 ))
+    then
+	MESSAGE INFO "Timing: $(($(date +%s) - _TIMING)) seconds."
+    fi
+    _TIMING=0
 }
+
 # show progress if run from terminal
 # optional arg 1: max time in sec setting
 function _PROGRESSBAR() {
    declare -a SYMB
    SYMB=( '.' '..' '...' '....' '.....')
    # Display progress bar
-   for ((i=0; i < ${1:-180}; i++)); do # max 3 minutes
+   for ((i=0; i < ${1:-180}; i++)); do            # max 3 minutes
      if [ -t 2 ]
      then
          printf "\r %-5s %3ds" ${SYMB[$(($i%5))]} $(($i/2)) >>$VERBOSE
@@ -221,12 +230,13 @@ function _PROGRESSBAR() {
 }
 # arg 1: max time setting in sec
 # do not show when level is high
-function STARTbar() {                 # start the progress bar
+function STARTbar() {                             # start the progress bar
    if ! [ -t 2 ] ; then return 0 ; fi
    if (( ${LEVEL[$MSG]:-3} >= ${LEVEL[QUIET]} )) ; then return 0 ; fi
    if [ -n "$_RUNNING" ] ; then kill $_RUNNIMG ; fi
     _PROGRESSBAR ${1:-180} &
     _RUNNING=$!
+    _TIMING=$(date +%s)
 }
 #STARTbar # default 180 seconds
 #sleep 5
@@ -234,9 +244,9 @@ function STARTbar() {                 # start the progress bar
 
 # ***************** MQTT service ****************************************
 # MOSQUITTO AUTH "$USER:passwd_string", if empty: anonymous
-MQTT_HOST=${HOSTIP:-localhost}      # default host for MQTT service
+MQTT_HOST=${HOSTIP:-localhost}                    # default host for MQTT service
 
-MQTT_PORT=1883                      # default service port 1883
+MQTT_PORT=1883                                    # default service port 1883
 MQTT_USER=mosquitto                 # default MQTT service system owner: user:password
 MQTT_CLIENT=                        # allowed user client: dflt: anonymous, or user[:password]
 # installation configurations for docker containers
@@ -247,6 +257,8 @@ MQTT_CLIENT=                        # allowed user client: dflt: anonymous, or u
 # container HOMEASSISTANT WEBgui on port 8123
 # service description
 DOCKERS[homeassistant]="Home Assistant Systsem (HAS). WebGui on port 8123"
+# container minimal disk space MB initial + operational space
+DOCKERS[homeassistant,MEM]=3200+1000
 # docker container data (home) directory base
 DOCKERS[homeassistant,HOME]=${DOCKERDIR}/homeassistant
 # container image in repository docker
@@ -258,7 +270,7 @@ DOCKERS[homeassistant,DFLT]=${DEFAULT_OPTIONS}
 # run with user id with private data
 DOCKERS[homeassistant,USER]=homeassistant
 # run with WebGUI on port
-DOCKERS[homeassistant,PORT]='--publish=8123:8123'   # WEBgui via http://localhost:8123
+DOCKERS[homeassistant,PORT]='--publish=8123:8123' # WEBgui via http://localhost:8123
 # install volumes in home dir of the container
 DOCKERS[homeassistant,DATA]=/config
 # containers needs more own arguments, maybe empty
@@ -288,17 +300,19 @@ Login via http://$(HOSTIP):8123  to allow HAS to start search for devices and in
 # used: https://www.zigbee2mqtt.io/guide/installation/02_docker.html#running-the-container
 # container ZIGBEE2MQTT (handle zigbee devices WEBgui on port 8080)
 DOCKERS[zigbee2mqtt]="Zigbee to MQTT gateway service. WebGui on port 8080."
+# container minimal disk space MB initial + operational space
+DOCKERS[zigbee2mqtt,MEM]=220+100
 # docker container data (home) directory base
 DOCKERS[zigbee2mqtt,HOME]=${DOCKERDIR}/zigbee2mqtt
 DOCKERS[zigbee2mqtt,IMAGE]=ghcr.io/koenkk/zigbee2mqtt
 DOCKERS[zigbee2mqtt,NAME]=zigbee2mqtt
-DOCKERS[zigbee2mqtt,USER]=zigbee2mqtt           # runs as zigbee2mqtt user
+DOCKERS[zigbee2mqtt,USER]=zigbee2mqtt             # runs as zigbee2mqtt user
 DOCKERS[zigbee2mqtt,DFLT]=${DEFAULT_OPTIONS}
-DOCKERS[zigbee2mqtt,PORT]='--publish=8080:8080' # WEBgui via http://localhost:8080
+DOCKERS[zigbee2mqtt,PORT]='--publish=8080:8080'   # WEBgui via http://localhost:8080
 # see: https://zigbee2mqtt.io/guide/adapters/ e.g. /ember2net.html
 ZIGBEE_DONGLES="(Nabu_Casa|HubZ_Smart|Sonoff_Zigbee)" # defined dongles add more
 # device will be detected automatically, group access is added to container
-DOCKERS[zigbee2mqtt,DEVICE]=      # /dev/serial/by-id/usb-ZIGBEE-DONGLE-serial-if00
+DOCKERS[zigbee2mqtt,DEVICE]=""                  # /dev/serial/by-id/usb-ZIGBEE-DONGLE-serial-if00
 DOCKERS[zigbee2mqtt,DATA]=/app/data:rw          # where configuration.yaml resides
 # CHANGE NEXT -- device  LINE !!!!!
 # zigbee dongle: the device needs to be found via ls -l /dev/serial/by-id/ command!!!
@@ -331,7 +345,7 @@ DOCKERS[zigbee2mqtt,ENV]="
 #   baudrate: 460800
 #   rtscts: true
 
-# for accessERRORS resolution with ownership inside container, add e.g.
+# for access ERRORS resolution with ownership inside container, add e.g.
 # --user=1001:1001 and gid dialout: --add-group=20
 # docker run -it --entrypoint /bin/sh --device /dev/ttyACM0 koenkk/zigbee2mqtt -c "ls -halt /dev/ttyACM0"
 # and/or run without detach and restart option
@@ -366,11 +380,13 @@ Serial dongle Z2M configuration:
 # ************************* WUD *****************************************
 # container WUD (containers automatic update service. WEBgui on 3000 port.)
 DOCKERS[wud]="Watch's Update Docker service. WebGui on port 3000."
+# container minimal disk space MB initial + operational space
+DOCKERS[wud,MEM]=300+25
 # docker container data (home) directory base
 DOCKERS[wud,HOME]=${DOCKERDIR}/wud
 DOCKERS[wud,IMAGE]=getwud/wud
 DOCKERS[wud,NAME]=wud
-DOCKERS[wud,USER]=
+DOCKERS[wud,USER]=""
 DOCKERS[wud,DFLT]=${DEFAULT_OPTIONS}
 DOCKERS[wud,PORT]='--publish=3000:3000'          # WEB gui as e.g. http://localhost:3000
 DOCKERS[wud,DATA]=/store
@@ -392,7 +408,7 @@ DOCKERS[wud,ENV]="
     --env=TZ=Europe/Amsterdam
     --env=WUD_WATCHER_LOCAL_CRON='15!1!*!*!6'
     --env=WUD_TRIGGER_DOCKER_LOCAL_PRUNE=true"
-DOCKERS[wud,CMD]=
+DOCKERS[wud,CMD]=""
 DOCKERS[wud,PREP]="Preparation: Default wud runs as user '${DOCKERS[wud,USER]:-anonymous}'.
 "
 DOCKERS[wud,AFTER]="
@@ -407,6 +423,8 @@ See: https://getwud.github.io/wud/#/
 # container GO2RTC (container video streaming service WEBgui on port 1984)
 # See: https://github.com/AlexxIT/go2rtc
 DOCKERS[go2rtc]="Video streaming service. WebGui on port 1984."
+# container minimal disk space MB initial + operational space
+DOCKERS[go2rtc,MEM]=200+2
 # docker container data (home) directory base
 DOCKERS[go2rtc,HOME]=${DOCKERDIR}/go2rtc
 DOCKERS[go2rtc,IMAGE]=alexxit/go2rtc
@@ -435,14 +453,16 @@ Or github pages: https://github.com/AlexxIT/go2rtc
 # From: https://github.com/matter-js/python-matter-server/blob/main/docs/docker.md
 # container MATTER (containers update server)
 DOCKERS[matter]="Generalized device managing service for matter devices. Preferrable via Thread."
+# container minimal disk space MB initial + operational space
+DOCKERS[matter,MEM]=400+10
 # docker container data (home) directory base
 DOCKERS[matter,HOME]=${DOCKERDIR}/matter
 #DOCKERS[matter,IMAGE]=ghcr.io/home-assistant-libs/python-matter-server:stable
 DOCKERS[matter,IMAGE]=ghcr.io/matter-js/python-matter-server:stable
 DOCKERS[matter,NAME]=matter
-DOCKERS[matter,USER]=                           # security?
+DOCKERS[matter,USER]=""                           # security?
 DOCKERS[matter,DFLT]=${DEFAULT_OPTIONS}
-DOCKERS[matter,PORT]=
+DOCKERS[matter,PORT]=""
 DOCKERS[matter,DATA]=/data
 DOCKERS[matter,OPTIONS]="
     --network=host
@@ -452,7 +472,7 @@ DOCKERS[matter,ENV]="
 "
 # WITH BLUETOOTH LOCAL COMMISIONING add cmd args after image:
 #      --storage-path /data --paa-root-cert-dir /data/credentials --bluetooth-adapter 0
-DOCKERS[matter,CMD]=
+DOCKERS[matter,CMD]=""
 DOCKERS[matter,DPTS]=homeassistant
 DOCKERS[matter,PREP]="Preparation: Default matter runs as user '${DOCKERS[matter,USER]:-anonymous}'.
 "
@@ -467,6 +487,8 @@ See: https://www.home-assistant.io/integrations/matter/
 # thanks to: https://github.com/sukesh-ak/setup-mosquitto-with-docker
 # container MQTT (containers update server) Alternative to mosquitto service
 DOCKERS[mqtt5]="Mosquitto service (eclipse) for MQTT messages e.g. zigbee2mqtt, tasmota, etc. WebGui on port ${MQTT_PORT:-1883}. Not operational."
+# container minimal disk space MB initial + operational space
+DOCKERS[mqtt5,MEM]=400+10
 # docker container data (home) directory base
 DOCKERS[mqtt5,HOME]=${DOCKERDIR}/mqtt5
 DOCKERS[mqtt5,IMAGE]=eclipse-mosquitto
@@ -481,7 +503,7 @@ DOCKERS[mqtt5,DATA]="
     ${DOCKERS[mqtt5,HOME]}/log"
 DOCKERS[mqtt5,OPTIONS]="
     --network=host"
-DOCKERS[mqtt5,CMD]=
+DOCKERS[mqtt5,CMD]=""
 DOCKERS[mqtt5,PREP]="Preparation: Default mqtt5 runs as user '${DOCKERS[mqtt5,USER]:-anonymous}'.
 "
 DOCKERS[mqtt5,AFTER]="
@@ -493,6 +515,8 @@ See: https://www.hivemq.com/blog/how-to-get-started-with-mqtt/
 # ************************* LyrionMusicServer ***************************
 # container lyrionmusic server : plays music from central archive to lyrion players (RPi4+)
 DOCKERS[lyrionmusic]="LyrionMusic Server for Lyrion Players. WebGui on port 9000."
+# docker container data (home) directory base MB initial + operational space
+DOCKERS[lyrionmusic,MEM]=180+500
 # docker container data (home) directory base
 DOCKERS[lyrionmusic,HOME]=${DOCKERDIR}/lyrionmusic
 DOCKERS[lyrionmusic,IMAGE]='lmscommunity/lyrionmusicserver:stable'
@@ -511,7 +535,7 @@ DOCKERS[lyrionmusic,OPTIONS]="
 DOCKERS[lyrionmusic,ENV]="
     --env=TZ=Europe/Amsterdam
 "
-DOCKERS[lyrionmusic,CMD]=
+DOCKERS[lyrionmusic,CMD]=""
 DOCKERS[lyrionmusic,PREP]="Preparation: Default lyrionmusic runs as user '${DOCKERS[lyrionmusic,USER]:-anonymous}'.
 "
 DOCKERS[lyrionmusic,AFTER]="
@@ -525,11 +549,13 @@ See: https://lyrion.org/
 # see: https://pimylifeup.com/raspberry-pi-portainer/
 # container portainer server : docker container GUI manager (create, edit, stop) on port 9443
 DOCKERS[portainer]="Portainer docker container (create/edit/stop/start) manager. WubGui on port 9002."
+# docker container data (home) directory base MB initial + operational space
+DOCKERS[portainer,MEM]=160+25
 # docker container data (home) directory base
 DOCKERS[portainer,HOME]=${DOCKERDIR}/portainer
 DOCKERS[portainer,IMAGE]='portainer/portainer-ce:latest'
 DOCKERS[portainer,NAME]=portainer
-DOCKERS[portainer,USER]=
+DOCKERS[portainer,USER]=""
 DOCKERS[portainer,DFLT]=${DEFAULT_OPTIONS}
 DOCKERS[portainer,PORT]="--publish=8000:8000/tcp"
 # https access:
@@ -542,7 +568,7 @@ DOCKERS[portainer,DATA]=/data
 DOCKERS[portainer,ENV]="
     --env=TZ=Europe/Amsterdam
 "
-DOCKERS[portainer,CMD]=
+DOCKERS[portainer,CMD]=""
 DOCKERS[portainer,PREP]="Preparation: Default portainer runs as user '${DOCKERS[portainer,USER]:-anonymous}'.
 "
 DOCKERS[portainer,AFTER]="
@@ -588,7 +614,7 @@ MQTT_CONF=/etc/mosquitto/conf.d/HAS.conf
 
 # check if service on port arg1 is accessable (arg2: also from remote)
 # arg1: port, optional arg2: host (dflt HOSTIP local IP number)
-function LISTENING() {                 # port is accessable?
+function LISTENING() {                      # port is accessable?
     local H=${2:-${HOSTIP}}
     MESSAGE INFO "Check port $1 can be accessed from remote IP ${H}. This can take a while."
     if netcat -w 10 -z $H ${1:-12345} 2>/dev/null
@@ -608,7 +634,7 @@ function LISTENING() {                 # port is accessable?
 # updated alternative for older docker_replay python script
 # TO DO: use existing containers installation details and allow run with updated arguments
 function DOCKER_rerun(){
-    MESSAGE WARN "Docker rerun script is not yet implemented."
+    MESSAGE WARNING "Docker rerun script is not yet implemented."
     return 1
 } 
 
@@ -642,7 +668,7 @@ function CREATE_USER(){
         then
              if [ -z "${CNTR}" ]
              then
-                  MESSAGE WARN "Missing container name for new user '${1/:/ group }'."
+                  MESSAGE WARNING "Missing container name for new user '${1/:/ group }'."
                   return 1
              fi
              # add user with gid to system accounts, disabled login
@@ -658,12 +684,12 @@ function CREATE_USER(){
                           --home "${DOCKERS[$CNTR,HOME]}" \
                           "${USERID}"
 	     then
-	          MESSAGE ERROR "Unable to create user '${1/:/, group }'.\nSkip container '${CNTR}' installation."
+	          MESSAGE ERR "Unable to create user '${1/:/, group }'.\nSkip container '${CNTR}' installation."
 	          return 1
 	     fi
              if ! SET_DIRECTORY "${DOCKERS[$CNTR,HOME]}" "${USERID}"
              then
-                  MESSAGE ERROR "Failed to set dir ownership ${DOCKERS[$CNTR,HOME]}."
+                  MESSAGE ERR "Failed to set dir ownership ${DOCKERS[$CNTR,HOME]}."
                   return 1
              fi
              MESSAGE NOTICE "Installed user ${1/:/, group member of }.\nHome directory '${DOCKERS[$CNTR,HOME]}' for container '${CNTR}'."
@@ -684,16 +710,16 @@ function COMPOSERIZE() {
     if ! [ -s "$IN" ] ; then return 1 ; fi
     if ! [ -w $OUT ]
     then
-         MESSAGE CRITICAL "Unable to write to YAML file $OUT."
+         MESSAGE CRIT "Unable to write to YAML file $OUT."
          return 1
     fi
-    MESSAGE ERROR "Not yet supported."
+    MESSAGE ERR "Not yet supported."
     MESSAGE NOTICE "Use https://www.composerize.com/ conversion service."
     return 1
     MESSAGE NOTICE "Create compose YAML file $OUT for docker container compose $CNTR."
     if [ -s $OUT ]
     then
-        MESSAGE WARN "YAML file exists! Will append to the file"
+        MESSAGE WARNING "YAML file exists! Will append to the file"
     else
         echo  "services:" >$OUT   # do not overwrite
     fi
@@ -711,7 +737,7 @@ function CMD_RUN_CNTR() {
     # ARG1=name container,
     # if present e.g. ARG2=INFO it's called from HELP (no system changes)
     local CNTR=$1 TYPE ID INFO=''
-    INFO+="\nOptional webGUI access of container '$CNTR':"
+    INFO+="\n    Optional webGUI access of container '$CNTR':"
     INFO+="\n    ${DOCKERS[$CNTR]}"
     local RTS=0 ITEM D
     # compile run argument list
@@ -720,7 +746,7 @@ function CMD_RUN_CNTR() {
         # if [ -z "${DOCKERS[$CNTR,$TYPE]}" ] ; then continue ; fi
         if echo "${DOCKERS[$CNTR,$TYPE]}" | grep -q UNDEFINED
         then
-             MESSAGE ERROR "Container '$CNTR' with type '$TYPE' needs UNDEFINED completed. Skipped."
+             MESSAGE ERR "Container '$CNTR' with type '$TYPE' needs UNDEFINED completed. Skipped."
              MESSAGE NOTICE "See: $(echo "${DOCKERS[$CNTR,$TYPE]}" | grep UNDEFINED)"
              RTS=1
         fi
@@ -847,7 +873,7 @@ function CMD_RUN_CNTR() {
             fi
         ;;
         *)
-            MESSAGE ERROR "Run args container '$CNTR' encountered unknown type '${Red}${TYPE}${Reset}'!"
+            MESSAGE ERR "Run args container '$CNTR' encountered unknown type '${Red}${TYPE}${Reset}'!"
             echo "${DOCKERS[$CNTR,$TYPE]}"
         ;;
         esac
@@ -863,13 +889,13 @@ function CMD_RUN_CNTR() {
     fi
     if [ -n "${DOCKERS[$CNTR,CMD]}" ]
     then
-          INFO+="\nCommand and cmd arguments: ${DOCKERS[$CNTR,CMD]}."
+          INFO+="\n    Command and cmd arguments: ${DOCKERS[$CNTR,CMD]}."
           for _ in ${DOCKERS[$CNTR,CMD]}
           do
               echo "$_" >>$TMP_DIR/args
           done
     fi
-    INFO+="\nSee ${DOCKERS[$CNTR,HOME]}/data/log/datum.time for logging info."
+    INFO+="\n    See ${DOCKERS[$CNTR,HOME]}/data/log/datum.time for logging info."
     MESSAGE INFO "${INFO}"
     # TMP_DIR/args has CLI 'docker run --detach' arguments
     awk '/^ *$/{ next ;} { print; }' $TMP_DIR/args # delete empty lines
@@ -882,6 +908,7 @@ function CMD_RUN_CNTR() {
 # #################################################################
 # help dump, restore container backups
 function BACKUP_HELP() {
+    VERBOSE=/dev/stdout
     echo -e "
 To dump container data use: '$CMD dump container_name ...'.
 To restore container data use: '$CMD restore container_name ...'.
@@ -976,8 +1003,15 @@ ${Black}restore container_name ...${Reset} Restore a container from tar dump arc
      If setup-sh in archived dump is available use the the setup script. Setup script
      will prefer to start the container via compose.yaml file.
 
+The script will only install a container image if there is enough free diskspace on the 'Linux' disk partition.
+And warn if there is not enough free space when running the container in time.
+
+${BLACK}Superuser rights${Reset}:
 Some operations need super user 'root' permission (using --privileged as option).
-If super user password is needed the script will ask via 'sudo' for the 'root' password. Once the pasword is entered the script will reuse the provide root permission via 'sudo'.
+If super user password is needed the script will ask via 'sudo' for the 'root' password.
+Once the password is entered the script will reuse the provide root permission via 'sudo'.
+Installing 'docker' the user '$USER' is added to the group to use docker commands.
+To enable this one is advised to logout and login again.
 
 The script will install automatically dependent system service(s) or containers when needed so.
 If a docker image is already installed and running,
@@ -1018,8 +1052,8 @@ ${Black}TO DO${Reset}:
             do
                printf "  ${Blue}%-16s${Reset}: %s\n" "${CNTR}" "${DOCKERS[$CNTR]}."
             done
-            echo -e "Manage docker containers via CLI command:\n  '${Black}docker${Reset} [ps|restart|stop|status] ${Black}dockerContainerName${Reset}'.\nOr use (remote) 'portainer' or 'wud'."
-        fi
+            echo -e "\nManage docker containers via CLI command:\n  '${Black}docker${Reset} [ps|restart|stop|status] ${Black}dockerContainerName${Reset}'.\nOr use (remote) 'portainer' or 'wud'."
+         fi
     fi
     if [ -z "$1" ] ; then exit 0 ; fi
     
@@ -1048,44 +1082,48 @@ ${Black}TO DO${Reset}:
 	#  HELP container_name
         if echo $CNTRS | grep -q "${CNTR}"
         then
-            if systemctl --quiet is-active docker
-            then
-                # is container running?
-                if ${SUDO}docker ps --format '{{.Names}}' | grep -q "${CNTR}"
+	    if [ -n "$Y" ]                # not quiet level: more detailed info
+	    then
+                if systemctl --quiet is-active docker
                 then
-                    [ -z "$Y" ] || echo -e "Docker container ${CNTR} is ${Black}already installed and running${Reset}."
-                elif ${SUDO}docker inspect "${DOCKERS[${1},IMAGE]:-None}" >/dev/null >/dev/null
-                then
-                    [ -z "$Y" ] || echo -e "Docker container ${CNTR} ${Black}image is installed${Reset} and ${Red}inactive${Reset}."
+                    # is container running?
+                    if ${SUDO}docker ps --format '{{.Names}}' | grep -q "${CNTR}"
+                    then
+                        echo -e "Docker container ${CNTR} is ${Black}already installed and running${Reset}."
+                    elif ${SUDO}docker inspect "${DOCKERS[${1},IMAGE]:-None}" 2>/dev/null | grep -q "${DOCKERS[${1},IMAGE]:-None}"
+                    then
+                        echo -e "Docker container ${CNTR} ${Black}image is installed${Reset} and ${Red}inactive${Reset}."
+                    fi
+                else
+                    echo -e "${Black}Docker is not running or not installed${Reset}. The script also install 'docker'."
                 fi
-            else
-                [ -z "$Y" ] || echo -e "${Black}Docker is not running or not installed${Reset}. The script also install 'docker'."
             fi
 
+	    if [ -n "${DOCKERS[${CNTR},MEM]}" ]
+            then
+		 echo -e "To install and run the container ${DOCKERS[${CNTR},MEM]} MB diskspace is needed."
+            fi
             if [ -n "${DOCKERS[${CNTR},PREP]}" ]
             then
                  echo -e "${Black}Before installation some notes${Reset}:\n${DOCKERS[${CNTR},PREP]}"
             fi
+            [ -z "$Y" ] || echo -e "Alternative to install docker image: '${Black}docker pull ${DOCKERS[${CNTR},IMAGE]}${Reset}' followed by"
             echo -e "How the docker container '${Black}${CNTR}${Reset}' is installed and activated via run command:"
-            echo -e "    Install image: '${Black}docker pull ${DOCKERS[${CNTR},IMAGE]}${Reset}' followed by"
             if [ -n "${DOCKERS[${CNTR},USER]}" ] && ! grep -q "^${DOCKERS[${CNTR},USER]:-root}:" /etc/passwd
             then
-                 [ -z "$Y" ] || echo -e "Container user ${Black}${DOCKERS[${CNTR},USER]:-anonymous} as owner${Reset} will be installed (user login is disabled)."
+                 echo -e "Container user ${Black}'${DOCKERS[${CNTR},USER]:-anonymous}' as owner${Reset} will be installed. The user login is disabled."
             else
                  echo -e "Container runs as user/group ${DOCKERS[${CNTR},USER]:-anonymous}: '${Black}docker run${Reset} ${Blue}arguments${Reset}' (see CLI command)."
             fi
-            echo -e -n "${Black}"
+
             CONFIG_CHECK ${CNTR:-None} INFO
-	    echo -e "Command to run the container ${CNTR}:"
 	    # maybe use composerize to convert run option to yaml file
-	    if (( ${LEVEL[$MSG]} <= ${LEVEL[INFO]} ))
-	    then
-	      CMD_RUN_CNTR ${CNTR} help | \
-                    awk '/--[a-z]/{ sub("=","\t");}
+	    [ -z "$Y" ] || CMD_RUN_CNTR ${CNTR} help | \
+                    awk -v str="\nDocker command options to run the container ${CNTR}:" '
+	                BEGIN { printf("%s\n",str); }
+			/--[a-z]/{ sub("=","\t");}
 		         { printf("    %s \\\n", $0);}
 			 END { print "\n";}'
-	    fi
-            [ -z "$Y" ] || echo -e "${Reset}"
             if [ -n "${DOCKERS[$CNTR,AFTER]}" ]
             then
                  echo -n -e "${Black}After installation${Reset}:"
@@ -1163,7 +1201,7 @@ function INSTALL_DOCKER(){
     MESSAGE DEBUG "Check: if docker runs ok:"
     if ! ${SUDO}docker run hello-world 2>&1 | grep -q  'Hello from Docker'
     then
-        MESSAGE EMERGE "Docker service failed to install."
+        MESSAGE EMERG "Docker service failed to install."
         exit 1
     fi
 
@@ -1200,7 +1238,7 @@ function INSTALL_DOCKER(){
 function INSTALL_MOSQUITTO() {
     if LISTENING ${MQTT_PORT:-1883} REMOTE
     then
-         MESSAGE WARN "There is already an MQTT service running on port ${MQTT_PORT:-1883}. Skipping installation."
+         MESSAGE WARNING "There is already an MQTT service running on port ${MQTT_PORT:-1883}. Skipping installation."
          return 1
     fi 
     MESSAGE NOTICE "Installing mosquitto service, mosquitto add on's, local config and passwd file."
@@ -1209,7 +1247,7 @@ function INSTALL_MOSQUITTO() {
     if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 >>${TMP_DIR}/mosquitto
     then
         STOPbar "Install ${Red}mosquitto${Reset}"
-        MESSAGE ERROR "Failed to install system service $SRVR."
+        MESSAGE ERR "Failed to install system service $SRVR."
         ERRORS mosquitto
     fi
     STOPbar "Install ${Blue}mosquitto${Reset}."
@@ -1222,7 +1260,7 @@ function INSTALL_MOSQUITTO() {
         if ! ${SUDO:-sudo} apt install ${SRVR}-clients -y -qq 2>&1 >>${TMP_DIR}/mosquitto
         then
             STOPbar "Install ${Red}${SRVR}-clients${Reset}"
-            MESSAGE WARN "Failed to install '${RSVR}-clients'."
+            MESSAGE WARNING "Failed to install '${RSVR}-clients'."
             ERRORS mosquitto
         fi
         STOPbar "Install ${Blue}${SRVR}-clients${Reset}"
@@ -1235,11 +1273,13 @@ function INSTALL_MOSQUITTO() {
     if [ -n "${MQTT_USER/:*/}" ]
     then
         MESSAGE NOTICE "Change user/pwd mosquitto with 'man mosquitto_passwd' (/etc/mosquitto/pwdfile)"
-        local NEW=
-        if [ -f /etc/mosquitto/pwdfile ] ; then NEW=-c ; fi
-        ${SUDO:-sudo} mosquitto_passwd -b ${NEW} /etc/mosquitto/pwdfile "${MQTT_USER/:*/}" "${MQTT_USER/*:/}"
+        MESSAGE NOTICE "See 'man mosquitto.conf' for more security configuration info."
+        MESSAGE NOTICE "You need to change the mosquitto conf file in /etc/mosquitto/conf.d."
+        ${SUDO:-sudo} touch /etc/mosquitto/pwfile ; ${SUDO:-sudo} chmod 640 /etc/mosquitto/pwfile
+        ${SUDO:-sudo} mosquitto_passwd -b /etc/mosquitto/pwfile "${MQTT_USER/:*/}" "${MQTT_USER/*:/}"
     else
         MESSAGE NOTICE "For security:\n    add USER to mosquitto: sudo mosquitto_passwd -c /etc/mosquitto/pwfile USER"
+        MESSAGE NOTICE "You may need to change the mosquitto conf file in /etc/mosquitto/conf.d."
     fi
     local ANONIMOUS=true
     if echo "${MQTT_CLIENT}" | grep -q ':' && [ -z "${MQTT_CLIENT/*:/}" ] # false if password is defined?
@@ -1287,6 +1327,35 @@ allow_anonymous $ANONIMOUS
     return 0
 }
 
+# check if there is enough space to install package
+# optional arg2: only show free space
+function CHECK_FREESPACE() {
+    local CNTR=${1:-homeassistant}
+    declare -i  MINIMAL=${DOCKERS[${CNTR},MEM]/+*/} # needed disk space in MB
+    # default minimal free space available for package CNTR (default HAS)
+    if (( $MINIMAL == 0 )) ; then MINIMAL=15000 ; fi # dflt homeassistant space
+    declare -i FREE LEFT  # for operations 90% of actual free space
+    FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME | awk '/Linux/{printf("%d",($1-$2)/1100000);}' )
+    if (( $FREE == 0 ))
+    then
+        MESSAGE INFO "Cannot detect enough space (not Linux type found)."
+	return 0
+    fi
+    if [ -n "$2" ]
+    then
+        MESSAGE DEBUG "$2Free disk space on Linux partition: ${FREE} MB (90%)."
+	return 0
+    elif (( ${FREE} < ${MINIMAL} ))
+    then
+        MESSAGE ERR "Not enough free disk space (free: $FREE, needed $MINIMAL) for ${CNTR}."
+        return 1
+    elif (( $FREE < (${DOCKERS[${CNTR},MEM]:-20000}) ))
+    then
+        MESSAGE WARNING "Free disk space ($FREE MB) is not enough (need ${DOCKERS[${CNTR},MEM]} MB) running the container ${CNTR}."
+    fi
+    return 0
+}
+
 # ##########################################################
 # ############## ADD SERVICE deamon ########################
 # ##########################################################
@@ -1300,9 +1369,11 @@ function ADD_SERVICE(){
           MESSAGE DEBUG "System service '${SRVR}' is already installed and running."
           return 0
     ;;
-    1|3)  MESSAGE CRITICAL "Service $SRVR deamon is not running. Restart deamon."
+    1)    MESSAGE CRIT "Service '$SRVR' deamon is not running. Restart manually."
     ;;
-    2)    MESSAGE CRITICAL "Service $SRVR deamon needs to be started."
+    2|3)  MESSAGE NOTICE "Service '$SRVR' deamon is installed but not running. Restarting service."
+	  ${SUDO:-sudo} systemctl  restart ${SRVR} ; sleep 2
+	  if systemctl --quiet is-active ${SRVR} ; then return 0 ; fi 
     ;;
     *)    MESSAGE INFO "Installing and starting $SRVR deamon."
     ;;
@@ -1319,24 +1390,25 @@ function ADD_SERVICE(){
         STATUS=$?
     ;;
     esac
-    if (( $STATUS = 0 ))
+    if (( $STATUS == 0 ))
     then
-        INSTALLED[${SRVR}]="${Green}Installed system service $SRVR${Reset}."
+        INSTALLED[${SRVR}]="Installed system service ${Blue}$SRVR${Reset}."
 	if [ ${SRVR} = mosquitto ]
 	then
 	    INSTALLED[${SRVR}]+=" Port $MQTT_PORT."
 	fi
     else
-        MESSAGE ERROR "Unknown system service '$SRVR'. Skipped."
+        MESSAGE ERR "Failed to install system service '${Red}$SRVR${Reset}'. Skipped."
 	INSTALLED[${SRVR}]="${Red}Failed to install container $SRVR${Reset}."
     fi
-    return 1
+    return $STATUS
 }
  
 # import (pull) Home Assistant docker container image. Arg: container name.
 function GET_IMAGE(){
     local IMG=0
     declare -i CNT=0
+    if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi  # enouph disk space?
     if ${SUDO}docker images | grep -q "${1}"
     then                                 # some image is already imported
         IMG=1
@@ -1352,7 +1424,7 @@ function GET_IMAGE(){
         if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" >${TMP_DIR}/pull
         then                  # some repros e.g. go2rtc have caching problems. Try again.
             STOPbar "${Red}Pull image ${DOCKERS[${1},IMAGE]}${Reset}"
-	    MESSAGE WARN "Failed to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again."
+	    MESSAGE WARNING "Failed to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again."
 	    sleep 15
             ERRORS pull
 	    rm -f ${TMP_DIR}/pull
@@ -1363,7 +1435,7 @@ function GET_IMAGE(){
     done
     if ! [ -f ${TMP_DIR}/pull ]
     then
-        MESSAGE WARN "Failed to pull image ${DOCKERS[${1},IMAGE]}. Unknown image?"
+        MESSAGE WARNING "Failed to pull image ${DOCKERS[${1},IMAGE]}. Unknown image?"
         return 4
     fi
     if grep -q 'up to date' ${TMP_DIR}/pull
@@ -1379,7 +1451,7 @@ function GET_IMAGE(){
     # check if image is uploaded and installed as image
     if ! ${SUDO}docker inspect "${DOCKERS[${1},IMAGE]}" >/dev/null >/dev/null
     then
-        MESSAGE WARN "Failed to install docker image '$1'. Archive problem?"
+        MESSAGE WARNING "Failed to install docker image '$1'. Archive problem?"
         return 3
     fi
     return $IMG
@@ -1415,7 +1487,7 @@ function GET_BACKUP(){
         BDIR=$(${SUDO:-sudo} ls ${DOCKERS[${CNTR},HOME]:-not_available} 2>/dev/null)
         if ! [ -n "$BDIR" ]
         then
-             MESSAGE WARN "Nothing to backup for container ${CNTR}. Or not existant."
+             MESSAGE WARNING "Nothing to backup for container ${CNTR}. Or not existant."
              continue
         else
              BDIR=$BDIR
@@ -1457,7 +1529,7 @@ function STOP_CONTAINER(){
             MESSAGE INFO "Stopping container '$ONE' ..."
             if ! ${SUDO}docker stop "${ONE}" >/dev/null
             then
-                MESSAGE WARN "Unable to stop container '${ONE}'."
+                MESSAGE WARNING "Unable to stop container '${ONE}'."
                 continue
             fi
         fi
@@ -1496,17 +1568,17 @@ function REMOVE_IMAGE(){
         IMAGE=$(docker image ls --all --format table 2>/dev/null | awk -v CNT=0  "/${ONE:-UNKOWN}/{ if( CNT++ == 0) { print \$3; }} END { if( CNT > 1) { exit(CNT); }}") 
         if (( $? > 1 )) && [ -n "$IMAGE" ]
         then
-            MESSAGE WARN "Found more as one image with name like '$ONE.\nUsing only $IMAGE id."
+            MESSAGE WARNING "Found more as one image with name like '$ONE.\nUsing only $IMAGE id."
         fi
         if [ -n "$IMAGE" ]
         then
             MESSAGE INFO "Removing docker container name '${ONE}' with image '${IMAGE}' from docker configuration."
             if ! ${SUDO}docker rmi ${IMAGE}  # remove image
             then
-                MESSAGE WARN "Unable to remove container image for '${ONE}'."
+                MESSAGE WARNING "Unable to remove container image for '${ONE}'."
             fi
         else
-            MESSAGE WARN "Unable to find image for of docker container $CNTR."
+            MESSAGE WARNING "Unable to find image for of docker container $CNTR."
         fi
         continue
     done
@@ -1535,20 +1607,20 @@ function ZIGBEE2MQTT_MQTT(){
             if [ -n "${MQTT_CLIENT/:*/}" ]
             then
                 echo "  user: ${MQTT_CLIENT/:*/} "
-                MESSAGE INFO "Zigbee2mqtt MQTT user ${MQTT_CLIENT/:*/}."
+                MESSAGE INFO "Zigbee2mqtt MQTT user authorized: ${MQTT_CLIENT/:*/}."
             else
 	        echo "  # user: anonimous"
-                MESSAGE WARN "Zigbee2mqtt MQTT  user anonymous."
+                MESSAGE WARNING "Zigbee2mqtt MQTT user authorisation anonymous."
 	    fi
 	    ;;
           password)
             if echo "${MQTT_CLIENT}" | grep -q ':' && [ -n "${MQTT_CLIENT/*:/}" ]
             then
                echo "  password: ${MQTT_CLIENT/:*/}"
-               MESSAGE DEBUG "Zigbee2mqtt MQTT user password ${MQTT_CLIENT/*:/}."
+               MESSAGE DEBUG "Zigbee2mqtt MQTT authorisation pwd ${MQTT_CLIENT/*:/}."
 	    else
 	       echo "  # password: acacadabra"
-               MESSAGE WARN "Zigbee2mqtt MQTT user/password: anonymous!"
+               MESSAGE WARNING "Zigbee2mqtt MQTT authorisation pwd: anonymous!"
             fi
             ;;
         esac
@@ -1557,7 +1629,7 @@ function ZIGBEE2MQTT_MQTT(){
 }
 
 # add environment variable settings to env run CLI command
-# depreciated
+# DEPRECIATED
 function ENV_ZIGBEE2MQTT_CONFIG() {
     local CONFIGS ITEM RTS=0
     CONFIGS+="AVAILABILITY_ENABLED=true"   # sets availability of a device
@@ -1586,7 +1658,7 @@ function ZIGBEE2MQTT_DFLT() {
     echo -e "# downloaded $(date +%Y-%m-%d) default config file\n# from: $GITHUB" >>${CONF}
     if ! wget -q --output-document=- "${GITHUB}" >>${CONF}
     then
-         MESSAGE WARN "Failed to download default yaml configure file.\nUsing own default."
+         MESSAGE WARNING "Failed to download default yaml configure file.\nUsing own default."
          echo "version: 5" >>${CONF}
     fi
     return 0
@@ -1611,7 +1683,7 @@ function YAML_MERGE() {
     then
          if ! ${SUDO:-sudo} apt install python3-ruamel.yaml -y 2>/dev/null >/dev/null
          then
-             MESSAGE ERROR "Require ruamel.yaml python lib. Unable to intall it."
+             MESSAGE ERR "Require ruamel.yaml python lib. Unable to intall it."
              return 1
 	 else
              MESSAGE INFO "Needed ruamel.yaml python lib: intalled."
@@ -1690,7 +1762,7 @@ advanced:
 	 if [ -n "$INF" ]
          then
 	     echo -e "Zigbee2mqtt localized configuration.yaml file: ${CONF}" >${VERBOSE}
-	     if (( ${LEVEL[$MSG]} < ${LEVEL[WARN]} ))
+	     if (( ${LEVEL[$MSG]} < ${LEVEL[WARNING]} ))
 	     then
 		     (echo "#----"; cat ${TMP_DIR}/update-conf.yaml; echo "#----") >${VERBOSE}
 	     fi
@@ -1705,12 +1777,12 @@ advanced:
 	 fi
          rm -f ${TMP_DIR}/{dflt,local,update}-conf.yaml
     else
-         MESSAGE WARN "Using existing zigbee2mqtt yaml config file."
+         MESSAGE WARNING "Using existing zigbee2mqtt yaml config file."
 	 MESSAGE NOTICE "Change network_key and expan_id to GENERATE in configuration yaml file if needed so."
     fi
     if [ -n "$DEBUG" ]
     then
-	(echo -e "Content ${CONF} yaml file:\n#----"; cat ${CONF}; echo "#----") >$VERBOSE
+	(echo -e "Content ${CONF} yaml file:\n#----"; cat ${CONF}; echo "#----") >>$VERBOSE
     fi
     return 0
 }
@@ -1724,7 +1796,7 @@ function GET_DONGLE(){
              if ! [ -d /dev/serial/by-id/ ]
              then
                  DONGLE=/dev/serial/by-id/FAKE_ZIGBEE_DONGLE_SERIAL_NR
-                 MESSAGE ${INF:-WARN} "${Red}No Zigbee dongle found${Reset}.\nUsing e.g. a fake one: ${Red}$DONGLE${Reset}?"
+                 MESSAGE ${INF:-WARNING} "${Red}No Zigbee dongle found${Reset}.\nUsing e.g. a fake one: ${Red}$DONGLE${Reset}?"
              else 
                  DONGLE=$(ls /dev/serial/by-id/ | grep -P "$ZIGBEE_DONGLES" | head -1)
                  DONGLE=/dev/serial/by-id/${DONGLE}
@@ -1739,7 +1811,7 @@ function GET_DONGLE(){
              fi
              if ! [ -c "${DONGLE}" ]
              then
-                 MESSAGE ${INF:-WARN} "Device ${DONGLE} does not exists! Using /dev/ttyACM0"
+                 MESSAGE ${INF:-WARNING} "Device ${DONGLE} does not exists! Using /dev/ttyACM0"
                  echo "--device=/dev/ttyACM0:/dev/ttyACM0"
                  RTS=1
              else
@@ -1779,7 +1851,7 @@ function GET_RESTORE_DATA() {
    declare -i CNT=0
    if ! echo ${!DOCKERS[@]} | awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort -r | uniq | grep -q "^${CNTR}$"
    then
-       MESSAGE ERROR "Unknown docker container $CNTR. Skipped."
+       MESSAGE ERR "Unknown docker container $CNTR. Skipped."
        return 1
    fi
 
@@ -1789,10 +1861,10 @@ function GET_RESTORE_DATA() {
    fi
    if (( ${#FILE[@]} > 0 ))
    then
-       echo -e "Found in "${BACKUP_DIR}/${CNTR}" ${#FILE[@]} backups (youngest first):" >$VERBOSE
+       echo -e "Found in "${BACKUP_DIR}/${CNTR}" ${#FILE[@]} backups (youngest first):" >>$VERBOSE
        for (( CNT=0; CNT < ${#FILE[@]} ; CNT++ ))
        do
-           echo -e "${Red}$CNT${Reset}\t${FILE[$CNT]}" >$VERBOSE
+           echo -e "${Red}$CNT${Reset}\t${FILE[$CNT]}" >>$VERBOSE
        done
        read -p "Enter which number? ${#FILE[@]} or enter path/filename or leave it blank (none): " -t 30 ANSWER
    fi
@@ -1808,7 +1880,7 @@ function GET_RESTORE_DATA() {
            return 0
        fi
    fi
-   MESSAGE WARN "Unable to locate archived tar dump file for contaner $CNTR."
+   MESSAGE WARNING "Unable to locate archived tar dump file for contaner $CNTR."
    return 1
 }
 
@@ -1820,17 +1892,17 @@ function RESTORE_DATA() {
     Z=$(${SUDO:-sudo} file -z ${FILE})
     if ! echo "$Z" | grep -q "POSIX tar"  # wonder how this can be generalized
     then
-	MESSAGE ERROR "Provided container archive file $FILE format not supported."
+	MESSAGE ERR "Provided container archive file $FILE format not supported."
 	return 1
     fi
     ${SUDO}docker rm ${CNTR}
     if ! ${SUDO:-sudo} tar --directory="${DOCKERS[${CNTR},HOME]}" ${DEBUG/*/-tv} -xf $FILE
     then
-	MESSAGE WARN "Unable to retrieve archived file $FILE for container $CNTR. Restart container."
+	MESSAGE WARNING "Unable to retrieve archived file $FILE for container $CNTR. Restart container."
 	${SUDO}docker restart $CNTR
 	return 1
     fi
-    MESSAGE WARN "Installed archived or config file $FILE for container ${CNTR}."
+    MESSAGE WARNING "Installed archived or config file $FILE for container ${CNTR}."
     return 0
 }
                    
@@ -1845,7 +1917,7 @@ function ADD_CONTAINER(){
     mqtt5)
         if pgrep mosquitto >/dev/null && LISTENING ${MQTT_PORT:-1883} 
         then
-            MESSAGE WARN "MQTT 'mosquitto' service is already active on port ${MQTT_PORT:-1883}."
+            MESSAGE WARNING "MQTT 'mosquitto' service is already active on port ${MQTT_PORT:-1883}."
             return 1
         fi
     ;;
@@ -1853,8 +1925,12 @@ function ADD_CONTAINER(){
     # check if image is installed. If not install/pull it from repository 
     GET_IMAGE "${CNTR}"
     case $? in
+     5)
+	 MESSAGE ERR "Not enough disk space for container '${CNTR}'. Skipped."
+         return 1
+     ;;	 
      3|4)
-         MESSAGE ERROR "Image for container '${CNTR}' cannot be installed. Skipped."
+         MESSAGE ERR "Image for container '${CNTR}' cannot be installed. Skipped."
          return 1
      ;;
      2)
@@ -1867,7 +1943,7 @@ function ADD_CONTAINER(){
                  MESSAGE INFO "Restart docker container ${CNTR}."
                  if ! ${SUDO}docker restart "${CNTR}"
 		 then
-		     MESSAGE ERROR "Failed to restart updated container ${CNTR}."
+		     MESSAGE ERR "Failed to restart updated container ${CNTR}."
                      return $?
 		 fi   
              fi
@@ -1908,7 +1984,7 @@ function ADD_CONTAINER(){
             then
                 if ! SET_DIRECTORY "${ITEM}" ${DOCKERS[${CNTR},USER]/:*/}
                 then
-                    MESSAGE ERROR "Unable to create and user ownership container directory '${ITEM}'."
+                    MESSAGE ERR "Unable to create and user ownership container directory '${ITEM}'."
                 else
                     MESSAGE INFO "Creating directory '${ITEM}' for container ${CNTR} with userid '$(echo ${DOCKERS[${CNTR},USER]:-root} | sed 's/:.*//')'."
                 fi
@@ -1930,9 +2006,9 @@ function ADD_CONTAINER(){
 	then
 	    if [ -z "${RESTORE[${CNTR}]}" ]       # container needs to be restored
             then
-	        MESSAGE WARN "Check it. Is docker container '${CNTR}' with webGUI listening on port '${PRT}'?"
-	        MESSAGE WARN "$(ss -HlpT 'sport = :${PRT}')\nFor now we just try restart the container '${CNTR}'."
-                MESSAGE WARN "Will just restarting container '${CNTR}'."
+	        MESSAGE WARNING "Check it. Is docker container '${CNTR}' with webGUI listening on port '${PRT}'?"
+	        MESSAGE WARNING "$(ss -HlpT 'sport = :${PRT}')\nFor now we just try restart the container '${CNTR}'."
+                MESSAGE WARNING "Will just restarting container '${CNTR}'."
                 ${SUDO}docker restart "${CNTR}"
 	        return 0
 	    fi
@@ -1947,7 +2023,7 @@ function ADD_CONTAINER(){
     # configure zigbee2mqtt configuration.yaml for operational container and webGUI
     if ! CONFIG_CHECK ${CNTR:-None}
     then
-        MESSAGE WARN "Cannot run docker container '$CNTR'.\nSkip to run container."
+        MESSAGE WARNING "Cannot run docker container '$CNTR'.\nSkip to run container."
         return 1
     fi
 
@@ -1969,7 +2045,7 @@ function ADD_CONTAINER(){
 DEBUG=$DEBUG       # for logging and bash interactive modus.
 if ${SUDO}docker ps --all --format 'table {{.Names}}' | grep -q ${CNTR}
 then    # if container is available, remove it
-    echo "Container ${CNTR} is already available! Container is stopped and removed." >$VERBOSE
+    echo "Container ${CNTR} is already available! Container is stopped and removed." >>$VERBOSE
     ${SUDO}docker stop ${CNTR} >/dev/null # if running stop it
     ${SUDO}docker rm ${CNTR} >/dev/null
 fi
@@ -1980,9 +2056,9 @@ then
     if [ -n "\$DEBUG" ]
     then
         MODUS=--detach=false
-        echo "Run container $CNTR in interactive/attached modus via via 'docker compose'." >$VERBOSE
+        echo "Run container $CNTR in interactive/attached modus via via 'docker compose'." >>$VERBOSE
     else
-        echo "Run container $CNTR in detached modus via CLI 'docker compose'." >$VERBOSE
+        echo "Run container $CNTR in detached modus via CLI 'docker compose'." >>$VERBOSE
     fi
     ${SUDO}docker compose -f ${DOCKERS[$CNTR,HOME]}/compose.yaml up \$MODUS
 else
@@ -1991,9 +2067,9 @@ else
     if [ -n "\$DEBUG" ]
     then
         MODUS="--interactive --tty"
-        echo "Run container $CNTR in interactive/attached \$DEBUG modus via CLI 'docker run'." >$VERBOSE
+        echo "Run container $CNTR in interactive/attached \$DEBUG modus via CLI 'docker run'." >>$VERBOSE
     else
-        echo "Running container $CNTR in detached modus via CLI 'docker run'." >$VERBOSE
+        echo "Running container $CNTR in detached modus via CLI 'docker run'." >>$VERBOSE
     fi
     ${SUDO}docker run \$MODUS \\
 EOF
@@ -2012,9 +2088,9 @@ EOF
     # or run the run arguments without detaich and restart option.
     # Alternative run docker exec -i conatainer_name on running container.
 
-    if ! ${SUDO}bash ${DEBUG/[0-9a-zA-Z]*/-x} $TMP_DIR/run_command >/dev/null 2>$VERBOSE
+    if ! ${SUDO}bash ${DEBUG/[0-9a-zA-Z]*/-x} $TMP_DIR/run_command >/dev/null 2>>$VERBOSE
     then
-         MESSAGE ERROR "Failed to start running '$CNTR' container."
+         MESSAGE ERR "Failed to start running '$CNTR' container."
 	 MESSAGE NOTICE "Try 'docker stop $CNTR', 'docker rm $CNTR' to clean up.
    CLI logging for cause: try setup.sh script in $CTNTR home directory
        with run options: --interactive --tty
@@ -2091,11 +2167,11 @@ function PURGE_IMAGE(){
 
     if [ -n "$CNTRS" ] && ! pgrep -u root dockerd >/dev/null # docker deamon should be alive
     then
-        MESSAGE EMERGE "Docker service deamon is not alive!"
+        MESSAGE EMERG "Docker service deamon is not alive!"
     else
         for ONE in $CNTRS
         do
-            MESSAGE WARN "Docker container and image '$ONE' will be purged from the system!"
+            MESSAGE WARNING "Docker container and image '$ONE' will be purged from the system!"
             REMOVE_IMAGE "${ONE,,}"
             if [ $TYPE = delete ] ; then DELETE_CONTAINER "{ONE,,}" ; fi
         done
@@ -2109,7 +2185,7 @@ function PURGE_IMAGE(){
             then
                 if echo $(${SUDO}docker ps --format '{{.ID}}' 2>/dev/null) | grep -q '[a-f0-9]' 
                 then
-                    MESSAGE EMERGE "Purge first all docker images on this system!"
+                    MESSAGE EMERG "Purge first all docker images on this system!"
                     return 1
                 else
                     ${SUDO:-sudo} delgroup --quiet docker
@@ -2181,7 +2257,7 @@ ${ITEM}"
    fi
    if [ -n "$RTS" ]
    then
-       MESSAGE WARN "Container or system service '$1' is not configured. Skipped."
+       MESSAGE WARNING "Container or system service '$1' is not configured. Skipped."
        return 1
    fi
    return 0
@@ -2199,14 +2275,15 @@ function CHK_DEPENDANT() {
 # ***************** end of routines ****************************
 # **************************************************************
 
-# *************** handle command line options
+# ############################# MAIN ###########################
+# *************** handle command line options ******************
 # get command line options -help, -debug,  ...
 while true
 do
     if [ -z "$1" ] || [ "${1/#-*[hH]*/help}" = "help" ]
     then
         shift
-        HELP $@
+        if [ -t 2 ] ; then HELP $@ | more ; else HELP $@ ; fi
         exit 0
     elif [ "${1/#-*[dD]*/debug}" = "debug" ]
     then
@@ -2227,7 +2304,7 @@ do
 	shift
 	if ! GET_DUMP $@
 	then
-	    MESSAGE ERROR "Failed to create tar dump of $? container(s)."
+	    MESSAGE ERR "Failed to create tar dump of $? container(s)."
 	    exit 1
 	fi
 	exit 0
@@ -2238,7 +2315,7 @@ done
 
 if [ -z "$1" ]   # no action, publish help info
 then
-    HELP
+    if [ -t 2 ] ; then HELP | more ; else HELP ; fi
     exit 0
 fi
 
@@ -2268,7 +2345,7 @@ do
                 then
 		     if ! GET_RESTORE_DATA "${1,,}"
 		     then
-			 MESSAGE ERROR "Unable to find backup data file or not supported container ${1,,}. Skipped."
+			 MESSAGE ERR "Unable to find backup data file or not supported container ${1,,}. Skipped."
 		     else
 			 ADD_ITEM ${1,,}
 		     fi
@@ -2294,18 +2371,52 @@ do
     esac
 done
 
+# check if system needs to be updated. Update if last update was older as a week ago
+function UPDATE_SYSTEM() {
+   local DAYS
+   if [ -f /var/log/apt/history.log ]
+   then
+       DAYS=$(grep End-Date /var/log/apt/history.log | cut -d ' ' -f 2 | tail -1)
+   fi
+   DAYS=$(date --date=${DAYS:-2000-01-01} +%s)
+   DAYS=$(($(date +%s)-$DAYS)) ; DAYS=$(($DAYS/86400))  # seconds to days
+   if (( $DAYS > 2 ))                                   # try to update
+   then
+       MESSAGE NOTICE "Updating system. Can take a while."
+       STARTbar
+       ${SUDO:-sudo} apt update 2>&1 >${TMP_DIR}/OSupdate
+       if ! ${SUDO:-sudo} apt upgrade -y 2>&1 >${TMP_DIR}/OSupdate
+       then
+	   ERRORS OSupdate
+	   MESSAGE ERR "Failed to update and upgrade OS system. Continue with installation."
+	   return 1
+       fi
+       rm -f ${TMP_DIR}/OSupdate
+       MESSAGE INFO "OS system is updated."
+   fi   
+   return 0
+}
+
 # ************************************* MAIN the work horse ***************************
 # and now install or update the docker containers
 declare -i RTS=0
 
+# keep system up to date
+UPDATE_SYSTEM
+
 if [ -n "${DEAMONS}" ]                                # install/update first the deamons
 then
-	MESSAGE INFO "Installing system service(s): $(echo ${DEAMONS})."
+    if ! sudo --validate                              # sudo passwd is pushed to cache
+    then
+	MESSAGE CRIT "Superuser credentials are required! Exiting."
+	exit 1
+    fi
+    MESSAGE INFO "Installing system service(s): $(echo ${DEAMONS})."
     for ITEM in ${DEAMONS}                            # ****** system service handling
     do
        if ! ADD_SERVICE "$ITEM"
        then
-           MESSAGE WARN "Install system OS service '$ITEM' is skipped."
+           MESSAGE WARNING "Install system OS service '$ITEM' is skipped."
            RTS+=1
        fi
     done
@@ -2316,15 +2427,21 @@ then
     if groups | grep -q -P "\sdocker" && systemctl --quiet is-active docker
     then
         SUDO=                     # docker is running and docker group is added for $USER
+    elif ! sudo --validate 
+    then
+	MESSAGE CRIT "Superuser credentials are required! Exiting."
+	exit 1
     fi
     MESSAGE INFO "Installing docker container(s): $(echo ${CONTAINERS})."
     for ITEM in ${CONTAINERS}                         # ****** docker containers handling
     do
+       CHECK_FREESPACE "${ITEM}" "BEFORE: "
        if ! ADD_CONTAINER "${ITEM,,}"
        then
-           MESSAGE WARN "Install/update docker container '${ITEM,,}' is skipped."
+           MESSAGE WARNING "Install/update docker container '${ITEM,,}' is skipped."
            RTS+=1
        fi
+       CHECK_FREESPACE "${ITEM}" "AFTER: "
     done
 fi
 
@@ -2334,11 +2451,11 @@ then
     MESSAGE NOTICE "Installation overview:"
     for ITEM in ${!INSTALLED[*]}
     do
-       MESSAGE WARN "${INSTALLED[$ITEM]}"
+       MESSAGE WARNING "${INSTALLED[$ITEM]}"
     done
 fi
 if (( $RTS > 0 ))
 then
-    MESSAGE ERROR "Unable to install/update one of $RTS services and docker containers."
+    MESSAGE ERR "Unable to install/update one of $RTS services and docker containers."
 fi
 exit $RTS
