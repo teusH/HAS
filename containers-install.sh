@@ -1517,7 +1517,7 @@ function CHECK_FREESPACE() {
     fi
     if [ -n "$2" ]                        # used by exploring used disk space
     then
-	printf -v "$2" "%d" $FREE
+	printf -v "$2" "%s" $FREE
     fi
     # needed disk space in MB
     [ -n "${DOCKERS[${CNTR}]}" ] && [ -n "${DOCKERS[${CNTR},MEM]/+*/}" ] && \
@@ -2602,7 +2602,7 @@ then
     MESSAGE INFO "Installing docker container(s): $(echo ${CONTAINERS})."
     for ITEM in ${CONTAINERS}                         # ****** docker containers handling
     do
-       declare -i BEFORE AFTER
+       LOCAL BEFORE AFTER
        CHECK_FREESPACE "${ITEM}" BEFORE
        if ! ADD_CONTAINER "${ITEM,,}"
        then
@@ -2610,7 +2610,7 @@ then
            RTS+=1
        fi
        CHECK_FREESPACE "${ITEM}" AFTER
-       MESSAGE DEBUG "Diskspace container ${ITEM} ($((${DOCKERS[${ITEM},MEM]})) Mb). Installation took $(( BEFORE - AFTER )) Mb diskspace."
+       MESSAGE DEBUG "Diskspace container ${ITEM} ($((${DOCKERS[${ITEM},MEM]})) Mb). Installation took $(( $BEFORE - $AFTER )) Mb diskspace."
        unset BEFORE AFTER
     done
 fi
