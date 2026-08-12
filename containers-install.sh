@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.4 $ $Date: 2026/08/09 12:10:52 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.7 $ $Date: 2026/08/12 21:00:27 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
 
 # debug mode. Echo only the actions. Just for security
@@ -108,7 +108,6 @@ fi
 # Define info function on exit
 cleanup_success() {
   rm -rf ${TMP_DIR}                   # clean up
-  BAR::RESET
 }
 cleanup_failure() {
   echo -e "${Red}Exiting on failure!${Reset}" >/dev/stderr
@@ -121,7 +120,6 @@ cleanup_failure() {
           rm -f "$F"
       fi
   done
-  BAR::RESET
 }
 cleanup() {
   if [ $? -eq 0 ]; then
@@ -129,6 +127,7 @@ cleanup() {
   else
     cleanup_failure
   fi
+  #[ -n "$BARinit" ] && BAR::RESET
 }
 
 # info and logging handler, be verbose of what is going on
@@ -282,7 +281,7 @@ function BAR::PRINT() {
    BAR::printbar                           # empty line
 }
 
-# show progress bar when notice level below N
+ESThow progress bar when notice level below N
 function BAR::STOP() {                     # stop progress bar
     if [ -n "$BARtiming" ] ; then BARtiming=$(($(date +%s) - $BARtiming - 2)) ; fi
     if [ -n "$1" ] && [ -n "$BARtiming" ] && (( "$BARtiming" >= 0 ))
@@ -301,9 +300,9 @@ function BAR::STOP() {                     # stop progress bar
 # on exit close bar virtual window on bottom window
 function BAR::RESET(){
     BAR::STOP
-    tput csr $(($(tput lines)-1)) 0        # Reset scroll region
     tput rmcup                             # Exit alternate screen
-    tput cnorm                             # Restore cursor exit 0
+    tput csr 0 $(($(tput lines)-1))        # Reset scroll region
+    tput cnorm                             # Restore coloring
     unset BARinit
 }
 
@@ -316,7 +315,7 @@ function BAR::INIT() {
    fi
 
    tput csr 0 $(($(tput lines)-2))         # initiate virtual window
-   tput clear
+   #tput clear
    #tput setab 4; tput setaf 7  # Blue background, white text
    printf "%-$(($(tput cols)-2))s" " "     # Print left aligned info
    trap BAR::RESET SIGINT SIGTERM EXIT
@@ -341,9 +340,9 @@ function BAR::START() {                    # start bar args: max sec, freq/sec, 
 # check if system needs to be updated. Update if last update was older as a week ago
 function UPDATE_SYSTEM() {
    local CNT RTS=0 timing
-   MESSAGE NOTICE "Check if OS system need to be updated. Can take some while."
+   MESSAGE NOTICE "Check if OS system need to be updated."
    # renew list of upgradable OS packages
-   CNT=$(${SUDO:-sudo} apt update 2>/dev/null | tee ${TMP_DIR}/OSupdate | \
+   CNT=$(${SUDO:-sudo} apt --quiet update 2>/dev/null | tee ${TMP_DIR}/OSupdate | \
 	   grep packages | tail -1 | sed -e 's/ .*//' -e 's/All/0/')
    if (( $CNT == 0 ))
    then
@@ -351,7 +350,8 @@ function UPDATE_SYSTEM() {
        rm -f ${TMP_DIR}/OSupdate
        return 0
    fi
-   timing="a minute or less" ; (( $CNT > 60 )) && timing="a few minutes" 
+   timing="a minute or less"
+   (( $CNT > 60 )) && timing="a few minutes"  ; (( $CNT > 100 )) && timing="several minutes" 
    MESSAGE NOTICE "Updating system. Can take $timing ..."
    read -p "Hit enter key within 10 seconds to skip the OS upgrade." -t 10 timing
    if (( $? > 0 ))                                # try to update
@@ -359,7 +359,7 @@ function UPDATE_SYSTEM() {
        MESSAGE INFO "Upgrade of ${Black}${Italic}$CNT OS system packages${Reset}."
        timing=$(($CNT*110/100))
        BAR::START "OS upgrade:" $timing
-       if ! ${SUDO:-sudo} apt-get --yes upgrade >>${TMP_DIR}/OSupdate   # no apt progress bar
+       if ! ${SUDO:-sudo} apt-get --yes --quiet upgrade | tee -a ${TMP_DIR}/OSupdate   # no apt progress bar
        then
            RTS=$?
 	   ERRORS upgrading
@@ -535,7 +535,7 @@ Serial dongle Z2M configuration:
 # container WUD (containers automatic update service. WEBgui on 3000 port.)
 DOCKERS[wud]="Watch's Update Docker service. WebGui on port 3000."
 # container minimal disk space MB initial + operational space
-DOCKERS[wud,MEM]=300+25
+DOCKERS[wud,MEM]=340+25
 # docker container data (home) directory base
 DOCKERS[wud,HOME]=${DOCKERDIR}/wud
 DOCKERS[wud,IMAGE]=getwud/wud
@@ -709,7 +709,7 @@ See: https://lyrion.org/
 # container portainer server : docker container GUI manager (create, edit, stop) on port 9443
 DOCKERS[portainer]="Portainer docker container (create/edit/stop/start) manager. WubGui on port 9002."
 # docker container data (home) directory base MB initial + operational space
-DOCKERS[portainer,MEM]=160+25
+DOCKERS[portainer,MEM]=170+25
 # docker container data (home) directory base
 DOCKERS[portainer,HOME]=${DOCKERDIR}/portainer
 DOCKERS[portainer,IMAGE]='portainer/portainer-ce:latest'
@@ -776,7 +776,7 @@ MQTT_CONF=/etc/mosquitto/conf.d/HAS.conf
 # arg1: port, optional arg2: host (dflt HOSTIP local IP number)
 function LISTENING() {                      # port is accessable?
     local H=${2:-${HOSTIP}}
-    MESSAGE INFO "Check port $1 can be accessed from remote IP ${H}. This can take a while."
+    MESSAGE INFO "Check port $1 can be accessed from remote IP ${H}.\nThis takes about 3 seconds."
     if netcat -w 10 -z $H ${1:-12345} 2>/dev/null
     then
         return 0
@@ -1196,7 +1196,6 @@ Docker container may use a serial dongle device. The group needed to access it i
 ${Black}TO DO${Reset}:
 - identify and use an available and running MQTT service on local network.
 - if container is already installed use the container configuration.
-- the docker container run argumentes could be converted to compose a yaml file.
 "
         if (( ${#SERVICES[@]} > 0 ))
         then
@@ -1424,7 +1423,7 @@ function INSTALL_MOSQUITTO() {
 	    MESSAGE INFO "Increase mosquitto install timing to $timing."
     rm -f ${TMP_DIR}/mosquitto
 
-    if ! which /usr/bin/mosquitto_sub >/dev/null 2>/dev/null
+    if ! which mosquitto_sub >/dev/null 2>/dev/null
     then
         MESSAGE INFO "Install $SRVR clients for MQTT debugging."
         BAR::START "mosquitto clients" 6
@@ -1497,34 +1496,36 @@ allow_anonymous $ANONIMOUS
          MESSAGE ALERT "Failed to restart mosquitto service.\nCheck journal and logging: e.g. run 'mosquitto -v -c /etc/mosquitto/mosquiito.conf'"
          return 1
     fi
+    if ! mosquitto_pub --host ${HOSTIP} -t test -m OK --quiet
+    then
+         MESSAGE ALERT "Mosquitto service is not accepting anonymous messages.\n Check logging mosquitto."
+    fi
     return 0
 }
 
 # check if there is enough space to install package
 # optional arg2: only show free space
 function CHECK_FREESPACE() {
-    local CNTR=${1:-homeassistant}
-    declare -i  MINIMAL=${DOCKERS[${CNTR},MEM]/+*/} # needed disk space in MB
+    local CNTR=${1:-homeassistant} MINIMAL=150
+    declare -i FREE=200
     # default minimal free space available for package CNTR (default HAS)
-    if (( $MINIMAL == 0 )) ; then MINIMAL=15000 ; fi # dflt homeassistant space
-    declare -i FREE LEFT  # for operations 90% of actual free space
     FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME | awk '/Linux/{printf("%d",($1-$2)/1100000);}' )
-    if (( $FREE == 0 ))
+    if (( FREE == 0 ))
     then
-        MESSAGE INFO "Cannot detect enough space (not Linux type found)."
+        MESSAGE INFO "Cannot detect enough space (not Linux disk type)."
 	return 0
     fi
-    if [ -n "$2" ]
+    if [ -n "$2" ]                        # used by exploring used disk space
     then
-        MESSAGE DEBUG "$2Free disk space on Linux partition: ${FREE} MB (90%)."
-	return 0
-    elif (( ${FREE} < ${MINIMAL} ))
-    then
-        MESSAGE ERR "Not enough free disk space (free: $FREE, needed $MINIMAL) for ${CNTR}."
-        return 1
-    elif (( $FREE < (${DOCKERS[${CNTR},MEM]:-20000}) ))
+	printf -v "$2" "%d" $FREE
+    fi
+    # needed disk space in MB
+    [ -n "${DOCKERS[${CNTR}]}" ] && [ -n "${DOCKERS[${CNTR},MEM]/+*/}" ] && \
+	    MINIMAL="${DOCKERS[${CNTR},MEM]/+*/}"
+    if (( $FREE < $MINIMAL ))
     then
         MESSAGE WARNING "Free disk space ($FREE MB) is not enough (need ${DOCKERS[${CNTR},MEM]} MB) running the container ${CNTR}."
+	return 1
     fi
     return 0
 }
@@ -2237,7 +2238,7 @@ then
     else
         echo "Run container $CNTR in detached modus via CLI 'docker compose'." >>$VERBOSE
     fi
-    ${SUDO}docker compose -f ${DOCKERS[$CNTR,HOME]}/compose.yaml up \$MODUS
+    ${SUDO}docker ${CNTR^^}_SERVER_ENABLED=true compose -f ${DOCKERS[$CNTR,HOME]}/compose.yaml up \$MODUS
 else
     # docker will be run default deamonized with: run --detach and --restart arguments:
     MODUS="--detach --restart=unless-stopped"
@@ -2292,8 +2293,9 @@ EOF
     rm -f $TMP_DIR/run_command
 
     # generate docker compose file for docker compose up -f compose.yml -d
-    if docker compose alpha generate ${CNTR} 2>/dev/null >${TMP_DIR}/compose.yaml 2>/dev/null
+    if ${SUDO}docker compose alpha generate ${CNTR} 2>/dev/null >${TMP_DIR}/compose.yaml
     then
+	sed -i -e "/host_ip:/s/invalid IP/${HOSTIP}/" -e "/${CNTR}:/s//&\\n    container_name: ${CNTR}/" ${TMP_DIR}/compose.yaml
 	${SUDO:-sudo} mv ${TMP_DIR}/compose.yaml ${DOCKERS[$CNTR,HOME]}/compose.yaml
 	MESSAGE NOTICE "Created docker (experimental) compose file: DOCKERS[$CNTR,HOME]/compose.yaml"
     fi
@@ -2468,7 +2470,7 @@ do                                         # handle options
         shift
         if [ -t 2 ] ; then HELP $@ | more ; else HELP $@ ; fi
         exit 0
-    elif [ "${1/#-*[dD]*/debug}" = "debug" ]
+    elif [ "${1/#-*[dD][eE][uU]*/debug}" = "debug" ]
     then
         shift
         MSG=DEBUG                          # message level to all
@@ -2576,7 +2578,7 @@ then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
     fi
-    MESSAGE INFO "Installing system service(s): $(echo ${DEAMONS})."
+    MESSAGE NOTICE "Installing system service(s): $(echo ${DEAMONS})."
     for ITEM in ${DEAMONS}                            # ****** system service handling
     do
        if ! ADD_SERVICE "$ITEM"
@@ -2592,7 +2594,7 @@ then
     if groups | grep -q -P "\sdocker" && systemctl --quiet is-active docker
     then
         SUDO=                     # docker is running and docker group is added for $USER
-    elif ! sudo --validate 
+    elif ! sudo true && ! sudo --validate 
     then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
@@ -2600,13 +2602,16 @@ then
     MESSAGE INFO "Installing docker container(s): $(echo ${CONTAINERS})."
     for ITEM in ${CONTAINERS}                         # ****** docker containers handling
     do
-       CHECK_FREESPACE "${ITEM}" "BEFORE: "
+       declare -i BEFORE AFTER
+       CHECK_FREESPACE "${ITEM}" BEFORE
        if ! ADD_CONTAINER "${ITEM,,}"
        then
            MESSAGE WARNING "Install/update docker container '${ITEM,,}' is skipped."
            RTS+=1
        fi
-       CHECK_FREESPACE "${ITEM}" "AFTER: "
+       CHECK_FREESPACE "${ITEM}" AFTER
+       MESSAGE DEBUG "Diskspace container ${ITEM} ($((${DOCKERS[${ITEM},MEM]})) Mb). Installation took $(( BEFORE - AFTER )) Mb diskspace."
+       unset BEFORE AFTER
     done
 fi
 
