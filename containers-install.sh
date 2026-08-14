@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.7 $ $Date: 2026/08/12 21:00:27 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.8 $ $Date: 2026/08/14 13:09:27 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
 
 # debug mode. Echo only the actions. Just for security
@@ -339,46 +339,74 @@ function BAR::START() {                    # start bar args: max sec, freq/sec, 
 
 # check if system needs to be updated. Update if last update was older as a week ago
 function UPDATE_SYSTEM() {
-   local CNT RTS=0 timing
-   MESSAGE NOTICE "Check if OS system need to be updated."
+   local CNT HOLDS RTS=0 timing 
+   # full-upgrade: basic plus hold packages incl removal
+   function UPGRADE() {                        # arg1: type (upgrade or full-upgrade
+       local TYPE ; declare -i NR=${2:-0}
+       case ${1,,} in
+	   full-upgrade|upgrade) TYPE=${1,,}
+           ;;
+           *) return 1                         # type not supported
+	   ;;
+       esac
+       [ "$TYPE,,}" != full-upgrade ] && TYPE="upgrade"
+       [ "$TYPE,,}" = full-upgrade ] && TYPE="full-upgrade"
+       (( ${NR} <= 0 )) && return 0              # nothing to do
+       read -p "Hit enter key within 10 seconds to skip the OS ${TYPE^^}." -t 10 timing
+       if (( $? > 0 ))                                # try a basic OS packages update
+       then
+           MESSAGE INFO "${TYPE^^} of ${Black}${Italic}$NR OS system packages${Reset}."
+           timing=$(($NR*110/100))
+           BAR::START "OS ${TYPE^^}:" $timing
+           if ! ${SUDO:-sudo} apt-get --yes --quiet ${TYPE,,} >>${TMP_DIR}/OSupgrade   # no apt progress bar
+           then
+               RTS=$?
+               ERRORS OSupgrade
+               MESSAGE WARNING "Failed to ${TYPE/-/ } OS system packages."
+           else
+               MESSAGE NOTICE "OS system packages: ${TYPE}d ${NR} packages."
+           fi
+           BAR::STOP timing
+           (( $timing > ( $(($CNT*3/2)) + 60 ) )) && \
+               MESSAGE INFO "Increase OS system upgrading algorithm."
+       fi
+       return $RTS
+   }
+
+   MESSAGE NOTICE "Check if OS system needs to be updated."
    # renew list of upgradable OS packages
-   CNT=$(${SUDO:-sudo} apt --quiet update 2>/dev/null | tee ${TMP_DIR}/OSupdate | \
-	   grep packages | tail -1 | sed -e 's/ .*//' -e 's/All/0/')
+   #${SUDO:-sudo} apt-get --quiet update 2>/dev/null >/dev/null
+   CNT=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | \
+	   tee -a ${TMP_DIR}/OSupgrade | grep --count '.*')
    if (( $CNT == 0 ))
    then
        MESSAGE INFO "OS system is up to date."
-       rm -f ${TMP_DIR}/OSupdate
+       rm -f ${TMP_DIR}/OSupgrade
        return 0
    fi
    timing="a minute or less"
-   (( $CNT > 60 )) && timing="a few minutes"  ; (( $CNT > 100 )) && timing="several minutes" 
-   MESSAGE NOTICE "Updating system. Can take $timing ..."
-   read -p "Hit enter key within 10 seconds to skip the OS upgrade." -t 10 timing
-   if (( $? > 0 ))                                # try to update
+   (( $CNT > 60 )) && timing="a few minutes" ; (( $CNT > 100 )) && timing="several minutes"
+
+   if (( $CNT > 0 ))                                # try a basic OS packages update
    then
-       MESSAGE INFO "Upgrade of ${Black}${Italic}$CNT OS system packages${Reset}."
-       timing=$(($CNT*110/100))
-       BAR::START "OS upgrade:" $timing
-       if ! ${SUDO:-sudo} apt-get --yes --quiet upgrade | tee -a ${TMP_DIR}/OSupdate   # no apt progress bar
+       MESSAGE NOTICE "Upgrading OS system.\nCan take $timing ..."
+       UPGRADE upgrade $(( $CNT - $HOLDS ))         # upgrade basic packages
+       if (( $RTS == 0 ))
        then
-           RTS=$?
-	   ERRORS upgrading
-           MESSAGE WARNING "Failed to update and upgrade all OS system packages."
-       else
-           MESSAGE NOTICE "Updated ${CNT} OS system packages."
+           HOLDS=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
+           UPGRADE full-upgrade $HOLDS                  # distribution upgrade OS pkgs
+	   if (( $RTS == 0 ))
+           then
+               MESSAGE NOTICE "Removing OS system packages not longer needed"
+               if ! ${SUDO:-sudo} apt-get --yes autoremove  >>${TMP_DIR}/OSupgrade # remove unused packages
+               then
+                   MESSAGE ERR "Failed to remove packages not longer required."
+	       fi
+	   fi
        fi
-       if ${SUDO:-sudo} apt-get --yes autoremove  >>${TMP_DIR}/OSupdate # remove unused packages
-       then
-           MESSAGE INFO "Removed packages not longer required."
-       else ERRORS upgrading
-       fi
-       BAR::STOP timing
-       (( $timing > ( $(($CNT*3/2)) + 60 ) )) && \
-	       MESSAGE INFO "Increase OS system upgrading algorithm."
-       rm -f ${TMP_DIR}/OSupdate
-   else
-       MESSAGE NOTICE "OS system upgrade is skipped."
    fi
+   (( $RTS > 0 )) && ERRORS OSupgrade && MESSAGE ERR "OS system upgrade is skipped."
+   rm -f ${TMP_DIR}/OSupgrade
    return $RTS
 }
 
@@ -1510,14 +1538,14 @@ function CHECK_FREESPACE() {
     declare -i FREE=200
     # default minimal free space available for package CNTR (default HAS)
     FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME | awk '/Linux/{printf("%d",($1-$2)/1100000);}' )
-    if (( FREE == 0 ))
+    if [ -z "$FREE" ] || (( $FREE == 0 ))
     then
         MESSAGE INFO "Cannot detect enough space (not Linux disk type)."
 	return 0
     fi
     if [ -n "$2" ]                        # used by exploring used disk space
     then
-	printf -v "$2" "%s" $FREE
+	printf -v "$2" "%d" ${FREE}
     fi
     # needed disk space in MB
     [ -n "${DOCKERS[${CNTR}]}" ] && [ -n "${DOCKERS[${CNTR},MEM]/+*/}" ] && \
@@ -2602,7 +2630,7 @@ then
     MESSAGE INFO "Installing docker container(s): $(echo ${CONTAINERS})."
     for ITEM in ${CONTAINERS}                         # ****** docker containers handling
     do
-       LOCAL BEFORE AFTER
+       declare -i BEFORE AFTER
        CHECK_FREESPACE "${ITEM}" BEFORE
        if ! ADD_CONTAINER "${ITEM,,}"
        then
