@@ -26,20 +26,43 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.8 $ $Date: 2026/08/14 13:09:27 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.10 $ $Date: 2026/08/17 19:47:42 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
+CONTAINERS=                          # unordered list of services/containers to install
+DEAMONS=
 
+# define default logging level
+MSG=NOTICE                              # defaut message level: be very versatyle
 # debug mode. Echo only the actions. Just for security
-MSG=ALL                              # defaut message level: be very versatyle
 if [ -n "${DEBUG}" ]                 # define 'DEBUG=echo' : showing all bash commands
 then
     MSG=DEBUG
     set -x
 fi
-function XTERM() {                   # check if text color can be used
-    [ -t 2 ] && echo ${TERM:-none} | grep -q xterm && (( $(tput colors) >= 128 )) && \
-	    return 0
+# check if there is a controlling tty
+function TTY() {                     # disable coloring and progress metering
+    ([ -z "${MSG/DEBUG/}" ] || [ -z "$(tty)" ] ) && return 1
+    return 0                              # if no /dev/tty (no xterm) disable as well
+}
+# check if text coloring and cursor management can be used
+function XTERM() {
+    if TTY 
+    then
+	if echo ${TERM:-none} | grep -q xterm && (( $(tput colors) >= 128 ))
+	then  return 0 ; fi
+    fi
     return 1
+}
+CURSOR_POS() {                       # get current cursor position line;col
+  local pos
+  [ -z "$Reset" ] && return 1
+  echo -en "\E[6n" ; read -sdR pos
+  if [ -z "$1" ] ; then echo ${pos#*[}
+  else printf -v "$1" "%s" ${pos#*[} ; fi
+  return 0
+
+  #IFS='[;' read -p $'\e[6n' -d R -a pos -rs || echo "failed with error: $? ; ${pos[*]}"
+  #printf -v "$1"  "${pos[1]}:${pos[2]}"
 }
 
 # Default list of containers is CONTAINERS
@@ -105,49 +128,91 @@ if XTERM ; then                       # text coloring van be used
     Reset="$(tput sgr0)"              # Text color reset
 fi
 
+# exit and interrupt handling
 # Define info function on exit
-cleanup_success() {
-  rm -rf ${TMP_DIR}                   # clean up
+function CLEANUP::success() {
+  rm -rf ${TMP_DIR}                   # clean up log files
+  [ -n "${Reset}" ] && (( ${#INSTALLED[@]} > 0 )) && \
+  MESSAGE OK "INSTALLED and UPDATED: ${#INSTALLED[@]}"
+  return 0
 }
-cleanup_failure() {
-  echo -e "${Red}Exiting on failure!${Reset}" >/dev/stderr
+
+function CLEANUP::failure() {         # show error files
+  MESSAGE STATE "ABORTED"
   for F in ${TMP_DIR}/*
   do
       if [ -z "${F/%*errors/}" ] && [ -s "${F}" ]
       then
-          echo -e  "See for failures the error file $F." >/dev/stderr
+          MESSAGE ERR "See for failures the error file $F."
       else
-          rm -f "$F"
+          rm -rf "$F"
       fi
   done
-}
-cleanup() {
-  if [ $? -eq 0 ]; then
-    cleanup_success
-  else
-    cleanup_failure
-  fi
-  #[ -n "$BARinit" ] && BAR::RESET
+  return 0
 }
 
+# cleanup logging and show saved error log files
+SUBshell=$$                            # flag which shell or subshell we are running
+function CLEANUP() {
+  local RTS=${1:-$?}
+  #[ "$SUBshell" != "$$" ] && echo "CLEANUP called from subshell $!"
+  [ "$SUBshell" != "$$" ] && return 0        # do not if in subshell
+  #echo "CLEANUP called from main shell pid $$"
+  #CURSOR_POS posyx
+  if [ $RTS -eq 0 ]; then
+    CLEANUP::success
+  else
+    CLEANUP::failure
+  fi
+  [ -n "$BARinit" ] && BAR::RESET          # should not happen
+}
+trap CLEANUP EXIT                          # on exit cleanup saved messages
+trap CLEANUP::failure INT TERM             # on interupt reset terminal
+
 # info and logging handler, be verbose of what is going on
-declare -A LEVEL                                  # information level for messages
+declare -A LEVEL                           # information level for messages
 LEVEL[EMERG]=7
 LEVEL[ALERT]=6
 LEVEL[CRIT]=5
 LEVEL[ERR]=4
 LEVEL[WARNING]=3
 LEVEL[NOTICE]=2
-LEVEL[INFO]=1                                     # default
+LEVEL[INFO]=1                              # default
 LEVEL[DEBUG]=0
 LEVEL[ALL]=0
-LEVEL[QUIET]=3                                    # errors and higher level
-# messages: arg1 level
+LEVEL[QUIET]=3                             # errors and higher level
+# messages show unprioritized messages or per priority level logging messages
+# args: level, messages ...
 function MESSAGE() {
-    [ -n "$2" ] || [ -n "$1" ] || return 0        # skip empty messages
+    [ -n "$2" ] || [ -n "$1" ] || return 0 # skip empty messages
     local STR=${2} L=$1
     if [ -z "$2" ] ; then L=ALL ; fi
-    case ${LEVEL[${L^^}]:-None} in                # set color level and message
+    if [ -z "${LEVEL[$L]}" ]
+    then                                   # state of script progress messages
+        (( ${LEVEL[NOTICE]:-2} < ${LEVEL[$MSG]:-4} )) && return 0
+        local COLOR
+        case "${1^^}" in
+                STATE|STATUS) COLOR="$(tput setab 4; tput setaf 7)${Bold}"
+                ;;
+                ERROR|FAIL*) COLOR="$(tput setab 1; tput setaf 7)${Bold}"
+                ;;
+                OK*) COLOR="$(tput setab 2; tput setaf 7)${Bold}"
+                ;;
+                *) COLOR="$(tput setab 8; tput setaf 7)${Bold}"
+                ;;
+        esac
+        [ -z "${Reset}" ] && COLOR=""      # no support for coloring
+        shift
+	                                   # center message
+	L=4 ; [ -n "${Reset}" ] && L=$(( ($(tput cols)-32)/2 )) ; (( $L < 0 )) && L=0
+        while [ -n "$1" ]
+        do
+            printf "%*s${COLOR} %*s %*s${Reset}\n" ${L:-4} "" $((20+(${#1}/2))) "$1" $(( 20-(${#1}/2) )) "" >${VERBOSE}
+            shift
+        done
+        return 0
+    fi
+    case ${LEVEL[${L^^}]:-None} in         # set color level and message
 	7) L="${RedWhite}${L^^}${Reset}"
 	   STR="${Red}${Bold}${STR}${Reset}"
         ;;
@@ -168,7 +233,7 @@ function MESSAGE() {
         ;;
         0) L="${Gray}${L^^}${Reset}"
         ;;
-        *) return 1                               # do not show message
+        *) return 1                        # do not show message
         ;;
     esac
     # show message when level is higher as quiet level
@@ -179,7 +244,7 @@ function MESSAGE() {
     # stop if level is equal or higher as critical level
     if (( ${LEVEL[$1]:-1} >= ${LEVEL[CRIT]:-5} )) # level of critical messages
     then
-       echo "${RedWhite}    EXITING    ${Reset}." >>${VERBOSE}
+       #MESSAGE FAULT "EXITING ON ERRORS"
        exit 1
     fi
 }
@@ -188,13 +253,15 @@ function MESSAGE() {
 function ERRORS() {
     local F=${1//*\//}
     if [ -z "$F" ] ; then return 0 ; fi
-    read -p "ERRORS Hit just hit enter key to continue." -t 30 ANONIMOUS || \
-	    MESSAGE EMERG "DISCONTINUED. Exiting."
+    ( ! TTY ) && MESSAGE EMERG "DISCONTINUED. Exiting." && exit 1
     if [ "$F" != errors ] && [ -s ${TMP_DIR}/"$F" ]
     then
         cat ${TMP_DIR}/"$F" >> ${TMP_DIR}/errors
-        rm -f ${TMP_DIR}/"$F"
     fi
+    [ ! -s ${TMP_DIR}/"$F" ] && return 0
+    rm -f ${TMP_DIR}/"$F"
+    read -p "ERRORS Hit just hit enter key to continue." -s -t 30 ANONIMOUS || \
+	    MESSAGE EMERG "DISCONTINUED. Exiting."
     return 0
 }
 
@@ -218,15 +285,21 @@ function HOSTIP() {
 }
 HOSTIP
 
+# progress bar process
 # print in virtual bottum window progress messages
 # arg1 max seconds, arg2 prints per second, arg3 if TIMING print elapsed time
 # arg3/4 use different title progress bar
 function BAR::PRINT() {
+   declare -i percent=100
+   declare -i cur=0 step=$((10000/(${2:-60}+1)/(${3:-4}+1)))
    # max seconds,frequency per second convert tp percentage
    local title="PROGRESS: " timing=$(date +%s) bckgrnd="$(tput setab 2; tput setaf 7)"
+   declare -i STOP=0
    function BAR::stop() {
-       cur=20000
+       STOP=1
    }
+   trap BAR::stop SIGINT SIGTERM
+   trap "" EXIT
    function BAR::printbar() {
       tput sc                     # Save cursor position
       tput cup $((LINES-1)) 0     # Move to last row
@@ -239,14 +312,13 @@ function BAR::PRINT() {
       tput sgr0                   # Reset colors
       tput rc                     # Restore cursor position
    }
+
    # calculate seconds to percentage max 100
-   trap BAR::stop SIGINT SIGTERM EXIT
    if [ -n "$1" ] ; then title="$1" ; fi
 
-   declare -i percent=100
-   declare -i cur=0 step=$((10000/(${2:-60}+1)/(${3:-4}+1)))
    while (( cur <= (percent*120+step) ))    # start producing progress bar
    do
+      (( $STOP == 1 )) && break   # stop bar stepping up
       declare -i  cols=$(tput cols)
       local bar secs max
       secs="$(echo "scale = 1; $cur*${2:-60}/($percent*100)" | bc)s"
@@ -273,25 +345,28 @@ function BAR::PRINT() {
       sleep $(echo "scale = 2; 1/${3:-4}" | bc)
       cur+=$step
    done
-   trap "" SIGINT SIGTERM EXIT
+   trap "" SIGINT SIGTERM
    printf -v bar "       Elapsed time: %d seconds" $(($(date +%s)-timing))
    sleep 1
    BAR::printbar "$(tput sgr0; tput bold)${bckgrnd}$bar"
    sleep 2                                 # give time to read
    BAR::printbar                           # empty line
+   return $STOP
 }
 
-ESThow progress bar when notice level below N
+# Show progress bar when notice level below N
 function BAR::STOP() {                     # stop progress bar
     if [ -n "$BARtiming" ] ; then BARtiming=$(($(date +%s) - $BARtiming - 2)) ; fi
     if [ -n "$1" ] && [ -n "$BARtiming" ] && (( "$BARtiming" >= 0 ))
     then 
-	printf -v "$1" "%s" "$BARtiming"
+	printf -v "$1" "%d" "$BARtiming"
     fi
     if [ -n "$BARrunning" ]
     then
-        skill $BARrunning ; unset BARrunning
-	sleep 1                            # wait on dying child
+        skill $BARrunning
+	local INTIME=None
+        wait -n -p INTIME $BARrunning      # wait on dying subshell and collect results
+	unset BARrunning
     fi
     tput el                                # clear progress bar
     unset BARtiming
@@ -300,38 +375,41 @@ function BAR::STOP() {                     # stop progress bar
 # on exit close bar virtual window on bottom window
 function BAR::RESET(){
     BAR::STOP
-    tput rmcup                             # Exit alternate screen
+    CURSOR_POS posyx
     tput csr 0 $(($(tput lines)-1))        # Reset scroll region
-    tput cnorm                             # Restore coloring
+    tput rmcup                             # Exit alternate screen
+    tput cnorm a                           # Restore coloring
     unset BARinit
+    #[ "${MSG,,}" = debug ] &&  echo "BAR::RESET called" >${VERBOSE}
+    CLEANUP
 }
 
 # progress bar initiated
 function BAR::INIT() {
-   # do not run if no terminal is attached or  already initiated
-   if ! XTERM                              # text coloringing cannot be used
-   then return 0
-   elif [ -n "$BARinit" ] ; then return 0
-   fi
+    # do not run if no terminal is attached or  already initiated
+    ( ! TTY ) && return 0                  # no xterm
+    [ -n "$BARinit" ] && return 0
 
-   tput csr 0 $(($(tput lines)-2))         # initiate virtual window
-   #tput clear
-   #tput setab 4; tput setaf 7  # Blue background, white text
-   printf "%-$(($(tput cols)-2))s" " "     # Print left aligned info
-   trap BAR::RESET SIGINT SIGTERM EXIT
-   BARinit="true"
-   unset BARrunning
+    tput csr 0 $(($(tput lines)-2))        # initiate virtual window
+    tput clear
+    printf "%-$(($(tput cols)-2))s" " "    # Print left aligned info
+    trap BAR::RESET SIGINT SIGTERM EXIT
+    BARinit="true"
+    unset BARrunning
+    return 0
 }
 
 # show progress if run from terminal
 # arg 1: max time setting in sec, arg2 freq per second 1..9,
 # arg3/4: title, arg3: if arg3=TIMING
 # do not show when level is high
-function BAR::START() {                    # start bar args: max sec, freq/sec, title, [TIMING]
-   BAR::INIT
-   BAR::PRINT "${1:-  }" ${2:-60} ${3:-3} &    # start USR1 signaler freq 3 per sec
-   BARrunning=$!
-   BARtiming=$(date +%s)
+function BAR::START() {                      # start bar args: max sec, freq/sec, title, [TIMING]
+    BAR::INIT
+    BAR::PRINT "${1:-  }" ${2:-60} ${3:-3} & # START USR1 SIGNALER freq 3 per sec
+    BARrunning=$!
+    BARtiming=$(date +%s)
+    echo
+    return 0
 }
 # use:
 # BAR::START title expectedTmeSecsDft60 frequencyPerSecondDflt4
@@ -339,41 +417,49 @@ function BAR::START() {                    # start bar args: max sec, freq/sec, 
 
 # check if system needs to be updated. Update if last update was older as a week ago
 function UPDATE_SYSTEM() {
-   local CNT HOLDS RTS=0 timing 
+   declare -i RTS=0 CNT=0 ; local DELAY
    # full-upgrade: basic plus hold packages incl removal
-   function UPGRADE() {                        # arg1: type (upgrade or full-upgrade
-       local TYPE ; declare -i NR=${2:-0}
+   function UPGRADE() {                      # arg1: type (upgrade or full-upgrade
+       local TYPE ANS=no ; declare -i NR=${2:-0}
        case ${1,,} in
 	   full-upgrade|upgrade) TYPE=${1,,}
            ;;
-           *) return 1                         # type not supported
+           *) return 1                       # type not supported
 	   ;;
        esac
-       [ "$TYPE,,}" != full-upgrade ] && TYPE="upgrade"
-       [ "$TYPE,,}" = full-upgrade ] && TYPE="full-upgrade"
-       (( ${NR} <= 0 )) && return 0              # nothing to do
-       read -p "Hit enter key within 10 seconds to skip the OS ${TYPE^^}." -t 10 timing
-       if (( $? > 0 ))                                # try a basic OS packages update
+       [ "${TYPE,,}" != full-upgrade ] && TYPE="upgrade"
+       [ "${TYPE,,}" = full-upgrade ] && TYPE="full-upgrade"
+       (( ${NR} <= 0 )) && return 0          # nothing to do
+       if TTY
        then
-           MESSAGE INFO "${TYPE^^} of ${Black}${Italic}$NR OS system packages${Reset}."
-           timing=$(($NR*110/100))
-           BAR::START "OS ${TYPE^^}:" $timing
+	   read -p "Hit enter key within 10 seconds to skip the OS ${TYPE^^}." -t "${T:-10}" ANS
+           (( $? > 0 )) && ANS=no
+       fi
+       if [ "$ANS" = no ]                    # do not skip upgrade
+       then
+           MESSAGE INFO "${TYPE/-/ } of ${Black}${Italic}$NR OS system packages${Reset}."
+	   BAR::START "OS ${TYPE^^}:" $(( ($NR*4)*130/100))
            if ! ${SUDO:-sudo} apt-get --yes --quiet ${TYPE,,} >>${TMP_DIR}/OSupgrade   # no apt progress bar
-           then
-               RTS=$?
-               ERRORS OSupgrade
-               MESSAGE WARNING "Failed to ${TYPE/-/ } OS system packages."
-           else
-               MESSAGE NOTICE "OS system packages: ${TYPE}d ${NR} packages."
-           fi
-           BAR::STOP timing
-           (( $timing > ( $(($CNT*3/2)) + 60 ) )) && \
+           then RTS=$? ; fi
+           BAR::STOP ANS
+           (( ${ANS:-0} > ( $(($NR*3/2)) + 60 ) )) && \
                MESSAGE INFO "Increase OS system upgrading algorithm."
+           NR=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
+	   if (( $NR == 0 ))
+           then
+               MESSAGE NOTICE "OS system packages: ${TYPE}d ${NR} packages."
+	       INSTALLED[OSsystem]="System applications are up to date."
+           elif (( $NR != ${2:-0} ))
+	   then
+	       RTS=0        # hold packages create false error return
+	       MESSAGE NOTICE "${TYPE/-/ } OS system packages update: $NR are on hold."
+	       INSTALLED[OSsystem]="System applications are updated. $NR are on hold."
+           fi
        fi
        return $RTS
    }
 
-   MESSAGE NOTICE "Check if OS system needs to be updated."
+   MESSAGE DEBUG "Check if OS system needs to be updated."
    # renew list of upgradable OS packages
    #${SUDO:-sudo} apt-get --quiet update 2>/dev/null >/dev/null
    CNT=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | \
@@ -384,30 +470,32 @@ function UPDATE_SYSTEM() {
        rm -f ${TMP_DIR}/OSupgrade
        return 0
    fi
-   timing="a minute or less"
-   (( $CNT > 60 )) && timing="a few minutes" ; (( $CNT > 100 )) && timing="several minutes"
+   DELAY="a minute or less"
+   (( $CNT > 60 )) && DELAY="a few minutes" ; (( $CNT > 100 )) && DELAY="several minutes"
 
    if (( $CNT > 0 ))                                # try a basic OS packages update
    then
-       MESSAGE NOTICE "Upgrading OS system.\nCan take $timing ..."
-       UPGRADE upgrade $(( $CNT - $HOLDS ))         # upgrade basic packages
-       if (( $RTS == 0 ))
+       MESSAGE NOTICE "Upgrading OS system: ca $CNT applications.\nCan take $DELAY ..."
+       if UPGRADE upgrade ${CNT}                       # upgrade basic packages
        then
-           HOLDS=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
-           UPGRADE full-upgrade $HOLDS                  # distribution upgrade OS pkgs
-	   if (( $RTS == 0 ))
+           CNT=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
+	   (( ${CNT:-0} > 0 )) && UPGRADE full-upgrade $CNT # distribution upgrade OS pkgs
+	   if (( $? == 0 ))
            then
+               CNT=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
+	       INSTALLED[OSsystem]="OS system is fully upgraded. $CNT on hold."
                MESSAGE NOTICE "Removing OS system packages not longer needed"
-               if ! ${SUDO:-sudo} apt-get --yes autoremove  >>${TMP_DIR}/OSupgrade # remove unused packages
+               if ${SUDO:-sudo} apt-get --yes autoremove  >>${TMP_DIR}/OSupgrade # remove unused packages
                then
-                   MESSAGE ERR "Failed to remove packages not longer required."
+	           INSTALLED[OSsystem]="OS system is up to date. Removed deprecated packages."
+		   MESSAGE OK "OS system is up to date"
 	       fi
 	   fi
        fi
    fi
-   (( $RTS > 0 )) && ERRORS OSupgrade && MESSAGE ERR "OS system upgrade is skipped."
+   (( $RTS > 0 )) && ERRORS OSupgrade && MESSAGE SKIPPED "OS system upgrade not completed"
    rm -f ${TMP_DIR}/OSupgrade
-   return $RTS
+   return 0
 }
 
 # #######################################################################
@@ -790,6 +878,7 @@ DOCKER_ADDON=python3-docker
 # use python script inspect.py to check docker run args with running containers
 
 declare -A SERVICES
+SERVICES[upgrade]="OS system check OS for updates and apply (full) upgrades"
 SERVICES[docker]="Docker container install and management system service/deamon."
 SERVICES[mosquitto]="Mosquitto system broker service for MQTT messages e.g. from zigbee2mqtt, tasmota, etc."
 MQTT_CONF=/etc/mosquitto/conf.d/HAS.conf
@@ -965,7 +1054,7 @@ function CMD_RUN_CNTR() {
 	    then
 		    DOCKERS[$CNTR,DEVICE]=$(GET_DONGLE $CNTR)
 	    fi
-            for ITEM in ${DOCKERS[$CNTR,DEVICE]}    # should be something like --device=/dev/tty:/dev/USB0
+            for ITEM in ${DOCKERS[$CNTR,DEVICE]}    # should be something like --device=/dev/ttyUSB0:/dev/ACM0
             do
 	       ID=${ITEM/*=/}                       # get serial device of the dongle
 	       # next depends if script USER has permission for /dev/serial/by-id directory
@@ -1098,8 +1187,8 @@ function CMD_RUN_CNTR() {
 function BACKUP_HELP() {
     VERBOSE=/dev/stdout
     echo -e "
-To archive container data use: '$CMD archive ${Italic}container_name${Reset} ...'.
-To restore container data use: '$CMD restore ${Italic}container_name${Reset} ...'.
+To archive container data use: '$SCRIPT archive ${Italic}container_name${Reset} ...'.
+To restore container data use: '$SCRIPT restore ${Italic}container_name${Reset} ...'.
 Docker local container data will be stored in an unencrypted (!) compress datafile in the directory $BACKUP_DIR in the subdirectory container_name.
 Dump files exceeding 3 tar-files and older as one month and will be removed.
 Suggested is to store e.g. via autofs and SMB-archive on a remote (NAS) filesystem.
@@ -1142,11 +1231,18 @@ How to use this command:
    ${Black}$0 [--level=LEVEL|--debug|help|default|install|purge|${Italic}container|service ...]${Reset}
 
 Optional argument:
-'--level=LEVEL' or '-l=LEVEL': level of verbosity, default level: $MSG
-    Levels of verbosity (prioritized): $(echo ${!LEVEL[@]} | sed 's/ /, /g').
-'--debug': Script will show statements executed. Or use CLI environment variable DEBUG=on.
+'${Black}--level=LEVEL${Reset}' or '${Black}-l=LEVEL${Reset}': level of verbosity.
+    Levels of verbosity (prioritized): ${Black}$(echo ${!LEVEL[@]} | sed 's/ /, /g')${Reset}.
+    Default logging level: $MSG
+    Level DEBUG will disable term (coloring and progress bar) features and enable ALL level.
+'${Black}--debug${Reset}': Script will show statements executed.
+    Or use CLI environment variable 'DEBUG=on'.
     In debug mode the script will install containers with tty and attached.
-    Tip: Terminal access to running container: 'docker debug container_name'.
+    Tips:
+       Coloring and progressbar will be disabled if termanal has no xterm capabilities.
+       Use 'DEBUG=on bash $SCRIPT ....' to enable visibility of all script commands used.
+       If available: terminal access to a running docker container: 'docker debug container_name'.
+
 '${Black}help${Reset}' gives this information as shown here.
 '${Black}help${Reset} name1 ...' shows container docker 'docker run --detach ...'
 
@@ -1162,7 +1258,7 @@ The container will be created via the 'docker run args ... image' (detached/alwa
 'service' either mosquitto or docker will do a system service installation.
 
 Command arguments configuration examples:
-${Blue}$CMD defaults${Reset}
+${Blue}$SCRIPT defaults${Reset}
      Runs with default container/image and service set.
      Default containers or services are: ${DEFAULTS// /, }.
 
@@ -1211,7 +1307,7 @@ one does not need to run this script for image version updates.
 
 ${Black}Advise${Reset}:
 Before installing a docker container one is advised to obtain some preparation information.
-E.g. use the command '${Black}$CMD help ${Blue}${Italic}container_name${Reset}'.
+E.g. use the command '${Black}$SCRIPT help ${Blue}${Italic}container_name${Reset}'.
 
 An alternative is to use Portainer docker container to create,
 add/delete configuration items to the container, stop and restart, update docker containers.
@@ -1437,13 +1533,13 @@ function INSTALL_MOSQUITTO() {
          MESSAGE WARNING "There is already an MQTT service running on port ${MQTT_PORT:-1883}. Skipping installation."
          return 1
     fi 
-    MESSAGE NOTICE "Installing mosquitto service, mosquitto add on's, local config and passwd file."
+    MESSAGE INFO "Installing mosquitto service, mosquitto add on's, local config and passwd file."
     BAR::START "Install mosquitto" 7
     ${SUDO:-sudo} apt-get update -qq    # update system libraries first
     if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 >>${TMP_DIR}/mosquitto
     then
         BAR::STOP
-        MESSAGE ERR "Failed to install system service $SRVR."
+        MESSAGE ERROR "Failed to install system service $SRVR."
         ERRORS mosquitto
     fi
     BAR::STOP timing
@@ -1564,6 +1660,12 @@ function CHECK_FREESPACE() {
 # add debian standard service (these are not docker containers)
 function ADD_SERVICE(){
     local SRVR=${1} STATUS
+    if [ "$SRVR" = upgrade ]
+    then                                 # (full} upgrade OS system
+	MESSAGE STATE "Checking OS system for updates"
+	UPDATE_SYSTEM
+	return $?
+    fi
     systemctl --quiet is-active ${SRVR}  # check if service deamon is running
     STATUS=$?
     case ${STATUS} in
@@ -1581,6 +1683,7 @@ function ADD_SERVICE(){
     ;;
     esac
 
+    MESSAGE STATE "Installing OS service ${SRVR}"
     STATUS=1
     case $SRVR in
     docker)
@@ -1600,7 +1703,7 @@ function ADD_SERVICE(){
 	    INSTALLED[${SRVR}]+=" Port ${Italic}$MQTT_PORT${Reset}."
 	fi
     else
-        MESSAGE ERR "Failed to install system service '${Red}$SRVR${Reset}'. Skipped."
+        MESSAGE SKIPPED "Failed to install system service '${Red}$SRVR${Reset}'. Skipped."
 	INSTALLED[${SRVR}]="${Red}Failed${Reset} to install container ${Italic}$SRVR${Reset}."
     fi
     return $STATUS
@@ -1743,7 +1846,7 @@ function STOP_CONTAINER(){
 }
 
 # #######################################################################
-# ################ DELETE CONTAINER ############## cleanup ##############
+# ################ DELETE CONTAINER ############## CLEANUP ##############
 # #######################################################################
 # delete home and user credentials of a container from the system
 function DELETE_CONTAINER(){
@@ -1888,7 +1991,7 @@ function YAML_MERGE() {
     then
          if ! ${SUDO:-sudo} apt install python3-ruamel.yaml -y 2>/dev/null >/dev/null
          then
-             MESSAGE ERR "Require ruamel.yaml python lib. Unable to intall it."
+             MESSAGE ERROR "Require ruamel.yaml python lib" "Unable to intall it"
              return 1
 	 else
              MESSAGE INFO "Needed ruamel.yaml python lib: intalled."
@@ -2057,7 +2160,7 @@ function GET_ARCHIVED() {
    if [ -n "${!ARCHIVED[@]}" ] ; then return 0 ; fi   # already done 
    if ! echo ${!DOCKERS[@]} | awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort -r | uniq | grep -q "^${CNTR}$"
    then                                               # unsupported container data
-       MESSAGE ERR "Unknown docker container $CNTR. Skipped."
+       MESSAGE SKIPPED "Unknown docker container $CNTR" "Skipped"
        return 1
    fi
 
@@ -2098,7 +2201,7 @@ function RESTORE() {
     Z=$(${SUDO:-sudo} file -z ${FILE})
     if ! echo "$Z" | grep -q "POSIX tar"  # wonder how this can be generalized
     then
-	MESSAGE ERR "Provided container archive file $FILE format not supported."
+	MESSAGE ERROR "Container archive file $FILE" "format not supported"
 	return 1
     fi
     ${SUDO}docker rm ${CNTR}
@@ -2132,11 +2235,11 @@ function ADD_CONTAINER(){
     GET_IMAGE "${CNTR}"
     case $? in
      5)
-	 MESSAGE ERR "Not enough disk space for container '${CNTR}'. Skipped."
+	 MESSAGE ERROR "Not enough disk space for container '${CNTR}'" "Skipped"
          return 1
      ;;	 
      3|4)
-         MESSAGE ERR "Image for container '${CNTR}' cannot be installed. Skipped."
+         MESSAGE SKIPPED "Image for container '${CNTR}' cannot be installed" "Skipped"
          return 1
      ;;
      2)
@@ -2149,7 +2252,7 @@ function ADD_CONTAINER(){
                  MESSAGE INFO "Restart docker container ${CNTR}."
                  if ! ${SUDO}docker restart "${CNTR}"
 		 then
-		     MESSAGE ERR "Failed to restart updated container ${CNTR}."
+		     MESSAGE ERROR "Failed to restart updated container ${CNTR}."
                      return $?
 		 fi   
              fi
@@ -2296,7 +2399,7 @@ EOF
 
     if ! ${SUDO}bash ${DEBUG/[0-9a-zA-Z]*/-x} $TMP_DIR/run_command >/dev/null 2>>$VERBOSE
     then
-         MESSAGE ERR "Failed to start running '$CNTR' container."
+         MESSAGE ERROR "Failed to start running '$CNTR' container"
 	 MESSAGE NOTICE "Try 'docker stop $CNTR', 'docker rm $CNTR' to clean up.
    CLI logging for cause: try setup.sh script in $CTNTR home directory
        with run options: --interactive --tty
@@ -2413,8 +2516,6 @@ function PURGE_APP(){
 }
 
 # check if dependant container or service is available, if not add them
-CONTAINERS=            # unordered list of services/containers to install
-DEAMONS=
 function ADD_ITEM() {
    local RTS=1 ITEM=${1,,} TYPE
    if [ -n "$2" ] ; then TYPE=" (e.g. $2 depends on it)" ; fi
@@ -2438,7 +2539,7 @@ function ADD_ITEM() {
        fi
        if ! echo $CONTAINERS | grep -q ${ITEM}
        then
-           MESSAGE NOTICE "Adding docker container '${ITEM}'${TYPE}."
+           MESSAGE INFO "Adding for docker: container '${ITEM}'${TYPE}."
            CONTAINERS+="
 ${ITEM}"
            CHK_DEPENDANT "${ITEM}"
@@ -2455,7 +2556,7 @@ ${ITEM}"
        fi
        if ! echo ${DEAMONS} | grep -q ${ITEM}
        then
-           MESSAGE NOTICE "Adding system service '${ITEM}'${TYPE}."
+           MESSAGE INFO "Adding for OS system: '${ITEM}'${TYPE}."
            DEAMONS+="
 ${ITEM}"
            CHK_DEPENDANT "${ITEM}"
@@ -2485,7 +2586,7 @@ function CHK_DEPENDANT() {
 # ############################# MAIN ###########################
 if [ -z "$1" ]   # no action, publish help info
 then
-    if [ -t 2 ] ; then HELP | more ; else HELP ; fi
+    if TTY ; then HELP | more ; else HELP ; fi
     exit 0
 fi
 
@@ -2496,7 +2597,10 @@ do                                         # handle options
     if [ -z "$1" ] || [ "${1/#-*[hH]*/help}" = "help" ]
     then
         shift
-        if [ -t 2 ] ; then HELP $@ | more ; else HELP $@ ; fi
+	#BAR::START "Help info" 60
+	if TTY ; then HELP $@ | more ; else HELP $@ ; fi
+	#BAR::STOP timing
+	#MESSAGE STATE "Help timing: $timing seconds"
         exit 0
     elif [ "${1/#-*[dD][eE][uU]*/debug}" = "debug" ]
     then
@@ -2516,9 +2620,6 @@ do                                         # handle options
         break
     fi
 done
-
-trap cleanup EXIT                         # on exit cleanup saved messages
-trap cleanup_failure INT TERM             # on interupt reset terminal
 
 # collect list of containers and services to manipulate
 
@@ -2547,8 +2648,10 @@ do                                        # maintenance actions
                 then
 	            if ! ARCHIVE ${_}
 	            then
-	                 MESSAGE ERR "Failed to archive data of ${_} container(s)."
+	                 MESSAGE ERROR "Failed to archive data of ${_} container(s)."
 	                 exit 1
+	            else
+			 MESSAGE OK "$1 local data of container ${_}"
 	            fi
 	         fi
 	    done
@@ -2567,6 +2670,7 @@ do                                        # maintenance actions
 			 MESSAGE ERR "Unable to find backup data file or not supported container ${_}. Skipped."
 		     else     # and install/update container
 			 ADD_ITEM ${_}
+			 MESSAGE OK "Restored local data for containet $_"
 		     fi
 		fi
 	    done
@@ -2596,12 +2700,12 @@ done
 declare -i RTS=0
 
 # keep system up to date
-UPDATE_SYSTEM
+ADD_ITEM upgrade                                      # default check OS for updates
 
 if [ -n "${DEAMONS}" ]                                # install/update first the deamons
 then
     MESSAGE INFO "Check if $USER has superuser credentials."
-    if ! sudo true                                    # sudo passwd is pushed to cache
+    if ! sudo true || ! sudo --validate               # sudo passwd is pushed to cache
     then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
@@ -2622,24 +2726,25 @@ then
     if groups | grep -q -P "\sdocker" && systemctl --quiet is-active docker
     then
         SUDO=                     # docker is running and docker group is added for $USER
-    elif ! sudo true && ! sudo --validate 
+    elif ! sudo true || ! sudo --validate 
     then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
     fi
-    MESSAGE INFO "Installing docker container(s): $(echo ${CONTAINERS})."
     for ITEM in ${CONTAINERS}                         # ****** docker containers handling
     do
        declare -i BEFORE AFTER
+       MESSAGE STATE "Installing container ${ITEM}"
        CHECK_FREESPACE "${ITEM}" BEFORE
        if ! ADD_CONTAINER "${ITEM,,}"
        then
            MESSAGE WARNING "Install/update docker container '${ITEM,,}' is skipped."
            RTS+=1
+       else
+           CHECK_FREESPACE "${ITEM}" AFTER
+           MESSAGE DEBUG "Diskspace container ${ITEM} ($((${DOCKERS[${ITEM},MEM]})) Mb). Installation took $(( $BEFORE - $AFTER )) Mb diskspace."
+           unset BEFORE AFTER
        fi
-       CHECK_FREESPACE "${ITEM}" AFTER
-       MESSAGE DEBUG "Diskspace container ${ITEM} ($((${DOCKERS[${ITEM},MEM]})) Mb). Installation took $(( $BEFORE - $AFTER )) Mb diskspace."
-       unset BEFORE AFTER
     done
 fi
 
@@ -2656,4 +2761,5 @@ if (( $RTS > 0 ))
 then
     MESSAGE ERR "Unable to install/update one of $RTS services and docker containers."
 fi
+#MESSAGE STATE "FINISHED"
 exit $RTS
