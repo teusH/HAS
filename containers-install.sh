@@ -1635,7 +1635,7 @@ function CHECK_FREESPACE() {
     # default minimal free space available for package CNTR (default HAS)
     # (too) simple detect used disk partition for the containers
     ROOTDEV="$(dirname $DOCKERDIR)" ; ROOTDEV="${ROOTDEV//\//.}"
-    ROOTDEV=$(mount | awk "/ on \\/ / || / on $ROOTDEV /{ print \$1 ; exit 0; }"
+    ROOTDEV=$(mount | awk "/ on \\/ / || / on $ROOTDEV /{ print \$1 ; exit 0; }")
     if ( $? > 0 ) || [ -z "${ROOTDEV}" ] || [ -z "${ROOTDEV/\/dev\/*/}" ]
     then
 	MESSAGE WARNING "Unable to detect (root) disk for docker."
