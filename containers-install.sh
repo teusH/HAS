@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.10 $ $Date: 2026/08/17 19:47:42 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.11 $ $Date: 2026/08/18 14:45:49 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -192,19 +192,19 @@ function MESSAGE() {
         (( ${LEVEL[NOTICE]:-2} < ${LEVEL[$MSG]:-4} )) && return 0
         local COLOR
         case "${1^^}" in
-                STATE|STATUS) COLOR="$(tput setab 4; tput setaf 7)${Bold}"
+                STATE|STATUS) COLOR="$(tput setab 123; tput setaf 0)${Bold}"
                 ;;
-                ERROR|FAIL*) COLOR="$(tput setab 1; tput setaf 7)${Bold}"
+                ERROR|FAIL*) COLOR="$(tput setab 225; tput setaf 9)${Bold}"
                 ;;
-                OK*) COLOR="$(tput setab 2; tput setaf 7)${Bold}"
+                OK*) COLOR="$(tput setab 118; tput setaf 0)${Bold}"
                 ;;
-                *) COLOR="$(tput setab 8; tput setaf 7)${Bold}"
+                *) COLOR="$(tput setab 254; tput setaf 0)${Bold}"
                 ;;
         esac
         [ -z "${Reset}" ] && COLOR=""      # no support for coloring
         shift
 	                                   # center message
-	L=4 ; [ -n "${Reset}" ] && L=$(( ($(tput cols)-32)/2 )) ; (( $L < 0 )) && L=0
+	L=4 ; [ -n "${Reset}" ] && L=$(( ($(tput cols)-34)/2 )) ; (( $L < 0 )) && L=0
         while [ -n "$1" ]
         do
             printf "%*s${COLOR} %*s %*s${Reset}\n" ${L:-4} "" $((20+(${#1}/2))) "$1" $(( 20-(${#1}/2) )) "" >${VERBOSE}
@@ -1630,10 +1630,19 @@ allow_anonymous $ANONIMOUS
 # check if there is enough space to install package
 # optional arg2: only show free space
 function CHECK_FREESPACE() {
-    local CNTR=${1:-homeassistant} MINIMAL=150
+    local CNTR=${1:-homeassistant} MINIMAL=150 ROOTDEV
     declare -i FREE=200
     # default minimal free space available for package CNTR (default HAS)
-    FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME | awk '/Linux/{printf("%d",($1-$2)/1100000);}' )
+    # (too) simple detect used disk partition for the containers
+    ROOTDEV="$(dirname $DOCKERDIR)" ; ROOTDEV="${ROOTDEV//\//.}"
+    ROOTDEV=$(mount | awk "/ on \\/ / || / on $ROOTDEV /{ print \$1 ; exit 0; }"
+    if ( $? > 0 ) || [ -z "${ROOTDEV}" ] || [ -z "${ROOTDEV/\/dev\/*/}" ]
+    then
+	MESSAGE WARNING "Unable to detect (root) disk for docker."
+        return 0
+    fi
+    FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME ${ROOTDEV} | \
+	    awk '/Linux/{printf("%d\n",($1-$2)/1100000); exit 0 ;}' )
     if [ -z "$FREE" ] || (( $FREE == 0 ))
     then
         MESSAGE INFO "Cannot detect enough space (not Linux disk type)."
@@ -2384,7 +2393,7 @@ else
 EOF
     # collect  and add docker run command options
     CMD_RUN_CNTR ${CNTR}  | awk '{ printf("    %s \\\n",$0);}' >>${TMP_DIR}/run_command
-    echo -e '    ${DEBUG/log*/}\nfi' >>${TMP_DIR}/run_command  # maybe should last line is image
+    echo -e '    ${DEBUG/log*/}\nfi' >>${TMP_DIR}/run_command  # last line is image?
 
     # START the docker container
     if ${SUDO}docker ps --all --format 'table {{.Names}}' | grep -q ${CNTR}
@@ -2409,7 +2418,7 @@ EOF
 	 rm -f $TMP_DIR/run_command
          STATUS+=1
     else
-	for PRT in $PTRS                        # check if exported ports are remotely available
+	for PRT in $PTRS                        # exported ports remotely available?
 	do
             if [ -n "$PRT" ] && ! LISTENING "$PRT" REMOTE 
             then
@@ -2457,19 +2466,19 @@ function PURGE_APP(){
     for ONE in $@
     do
         case "${ONE,,}" in
-        all)
+        all)                                        # all supported
              PURGE_APP $TYPE $(echo ${!DOCKERS[@]} | sed 's/,[A-Z][A-Z]*//g' | \
                 awk '{ for(i=1;i<=NF;i++){print $i};}' | sort | uniq )
              PURGE_APP $TYPE mosquitto docker
              return $?
         ;;
-        default*)
+        default*)                                   # defaults for HAS
              PURGE_APP $TYPE ${DEFAULTS,,}
         ;;
-        docker|mosquitto)   # system OS service
+        docker|mosquitto)                           # system OS service
             SRVRS+=" ${ONE,,}"
         ;;
-        *)                  # docker container
+        *)                                          # docker container
             CNTRS+=" ${ONE,,}"
         ;;
         esac
@@ -2523,7 +2532,7 @@ function ADD_ITEM() {
    # is it a supported docker container?
    if echo ${!DOCKERS[@]} | awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort | uniq | grep -q "^${ITEM}$"
    then
-       if ! systemctl --quiet is-active docker         # is docker installed and running?
+       if ! systemctl --quiet is-active docker         # docker installed and running?
        then
            ADD_ITEM docker ${ITEM}
        else   
@@ -2552,7 +2561,7 @@ ${ITEM}"
        if systemctl --quiet is-active ${ITEM}
        then
            MESSAGE DEBUG "System service ${ITEM}${TYPE} is already installed and running. Skipped."
-           return 0                                    # already installed and running
+           return 0                                    # already installed  running
        fi
        if ! echo ${DEAMONS} | grep -q ${ITEM}
        then
@@ -2593,7 +2602,7 @@ fi
 # *************** handle command line options ******************
 # get command line options -help, -debug,  --level={all,info,notice,quiet,..}
 while true
-do                                         # handle options
+do                                              # handle options
     if [ -z "$1" ] || [ "${1/#-*[hH]*/help}" = "help" ]
     then
         shift
@@ -2605,8 +2614,8 @@ do                                         # handle options
     elif [ "${1/#-*[dD][eE][uU]*/debug}" = "debug" ]
     then
         shift
-        MSG=DEBUG                          # message level to all
-        set -x                             # show statements as executed by script
+        MSG=DEBUG                               # message level to all
+        set -x                                  # show statements executed by script
     elif [ "${1/#-*[lL]*/level}" = "level" ]
     then
         MSG=${1/*=/} ; MSG=${MSG^^}
@@ -2625,9 +2634,9 @@ done
 
 # check if first arg is defining operational modus
 while [ -n "${1}" ]
-do                                        # maintenance actions
+do                                             # maintenance actions
     case "${1,,}" in
-        purge|delete)                     # purge/delete containers and services
+        purge|delete)                          # purge/delete containers and services
             _="${1,,}" ; shift
             while [ -n "${1,,}" ]
             do
@@ -2657,7 +2666,7 @@ do                                        # maintenance actions
 	    done
 	    exit 0
 	;;
-        restore)              # restore local container data
+        restore)                                # restore local container data
 	    shift
 	    if [ "${1,,}" = all ] ; then _=$(ls ${DOCKERSDIR}/ 2>/dev/null) ; else _=$@ ; fi
 	    GET_ARCHIVED
@@ -2668,7 +2677,7 @@ do                                        # maintenance actions
 		     if ! RESTORE "${_}"
 		     then
 			 MESSAGE ERR "Unable to find backup data file or not supported container ${_}. Skipped."
-		     else     # and install/update container
+		     else                       # and install/update container
 			 ADD_ITEM ${_}
 			 MESSAGE OK "Restored local data for containet $_"
 		     fi
@@ -2677,12 +2686,12 @@ do                                        # maintenance actions
 	    exit $?
 	;;
 	# add services, containers to be installed
-        install|update)                              # add force?
+        install|update)                         # add force?
             shift
         ;;
-        default*)                                    # install or update defaults
+        default*)                               # install or update defaults
             # initialisation variables
-            for ITEM in ${DEFAULTS}                  # add defaults
+            for ITEM in ${DEFAULTS}             # add defaults
             do
                 ADD_ITEM ${ITEM}
             done
@@ -2697,21 +2706,22 @@ done
 
 # ****************************** MAIN the work horse ***************************
 # and now install or update the docker containers
+[ -z "${DEAMONS}" ] && [ -z "${CONTAINERS}" ] && exit 0
 declare -i RTS=0
 
 # keep system up to date
-ADD_ITEM upgrade                                      # default check OS for updates
+ADD_ITEM upgrade                                 # default check OS for updates
 
-if [ -n "${DEAMONS}" ]                                # install/update first the deamons
+if [ -n "${DEAMONS}" ]                           # install/update first the deamons
 then
     MESSAGE INFO "Check if $USER has superuser credentials."
-    if ! sudo true || ! sudo --validate               # sudo passwd is pushed to cache
+    if ! sudo true || ! sudo --validate          # sudo passwd is pushed to cache
     then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
     fi
     MESSAGE NOTICE "Installing system service(s): $(echo ${DEAMONS})."
-    for ITEM in ${DEAMONS}                            # ****** system service handling
+    for ITEM in ${DEAMONS}                       # ****** system service handling
     do
        if ! ADD_SERVICE "$ITEM"
        then
@@ -2721,17 +2731,17 @@ then
     done
 fi
 
-if [ -n "${CONTAINERS}" ]                             # install/update docker containers
+if [ -n "${CONTAINERS}" ]                        # install/update docker containers
 then
     if groups | grep -q -P "\sdocker" && systemctl --quiet is-active docker
     then
-        SUDO=                     # docker is running and docker group is added for $USER
+        SUDO=            # docker is running and docker group is added for $USER
     elif ! sudo true || ! sudo --validate 
     then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
     fi
-    for ITEM in ${CONTAINERS}                         # ****** docker containers handling
+    for ITEM in ${CONTAINERS}                    # ****** docker containers handling
     do
        declare -i BEFORE AFTER
        MESSAGE STATE "Installing container ${ITEM}"
