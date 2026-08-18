@@ -1634,11 +1634,11 @@ function CHECK_FREESPACE() {
     declare -i FREE=200
     # default minimal free space available for package CNTR (default HAS)
     # (too) simple detect used disk partition for the containers
-    ROOTDEV="$(dirname $DOCKERDIR)" ; ROOTDEV="${ROOTDEV//\//.}"
-    ROOTDEV=$(mount | awk "/ on \\/ / || / on $ROOTDEV /{ print \$1 ; exit 0; }")
-    if ( $? > 0 ) || [ -z "${ROOTDEV}" ] || [ -z "${ROOTDEV/\/dev\/*/}" ]
+    ROOTDEV="$(dirname $DOCKERDIR)"
+    ROOTDEV=$(mount | awk "/ on \\/ / || / on ${ROOTDEV//\/.} /{ print \$1 ; exit 0; }")
+    if ( $? > 0 ) || [ -z "${ROOTDEV}" ] || [ -n "${ROOTDEV/\/dev\/*/}" ]
     then
-	MESSAGE WARNING "Unable to detect (root) disk for docker."
+	    MESSAGE WARNING "Unable to detect (root) disk for docker."
         return 0
     fi
     FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME ${ROOTDEV} | \
@@ -1646,11 +1646,11 @@ function CHECK_FREESPACE() {
     if [ -z "$FREE" ] || (( $FREE == 0 ))
     then
         MESSAGE INFO "Cannot detect enough space (not Linux disk type)."
-	return 0
+	    return 0
     fi
     if [ -n "$2" ]                        # used by exploring used disk space
     then
-	printf -v "$2" "%d" ${FREE}
+	    printf -v "$2" "%d" ${FREE}
     fi
     # needed disk space in MB
     [ -n "${DOCKERS[${CNTR}]}" ] && [ -n "${DOCKERS[${CNTR},MEM]/+*/}" ] && \
@@ -1658,7 +1658,7 @@ function CHECK_FREESPACE() {
     if (( $FREE < $MINIMAL ))
     then
         MESSAGE WARNING "Free disk space ($FREE MB) is not enough (need ${DOCKERS[${CNTR},MEM]} MB) running the container ${CNTR}."
-	return 1
+	    return 1
     fi
     return 0
 }
