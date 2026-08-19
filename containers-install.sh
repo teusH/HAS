@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.11 $ $Date: 2026/08/18 14:45:49 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.16 $ $Date: 2026/08/19 20:35:37 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -133,7 +133,6 @@ fi
 function CLEANUP::success() {
   rm -rf ${TMP_DIR}                   # clean up log files
   [ -n "${Reset}" ] && (( ${#INSTALLED[@]} > 0 )) && \
-  MESSAGE OK "INSTALLED and UPDATED: ${#INSTALLED[@]}"
   return 0
 }
 
@@ -165,6 +164,8 @@ function CLEANUP() {
     CLEANUP::failure
   fi
   [ -n "$BARinit" ] && BAR::RESET          # should not happen
+  (( ${#INSTALLED[@]} > $RTS )) && MESSAGE OK "INSTALLED and UPDATED: $((${#INSTALLED[@]} - $RTS))"
+  (( $RTS > 0 )) && MESSAGE ERROR "FAILED to install or update: $RTS))"
 }
 trap CLEANUP EXIT                          # on exit cleanup saved messages
 trap CLEANUP::failure INT TERM             # on interupt reset terminal
@@ -204,7 +205,7 @@ function MESSAGE() {
         [ -z "${Reset}" ] && COLOR=""      # no support for coloring
         shift
 	                                   # center message
-	L=4 ; [ -n "${Reset}" ] && L=$(( ($(tput cols)-34)/2 )) ; (( $L < 0 )) && L=0
+	L=4 ; [ -n "${Reset}" ] && L=$(( ($(tput cols)-40)/2 )) ; (( $L < 0 )) && L=0
         while [ -n "$1" ]
         do
             printf "%*s${COLOR} %*s %*s${Reset}\n" ${L:-4} "" $((20+(${#1}/2))) "$1" $(( 20-(${#1}/2) )) "" >${VERBOSE}
@@ -294,7 +295,7 @@ function BAR::PRINT() {
    declare -i cur=0 step=$((10000/(${2:-60}+1)/(${3:-4}+1)))
    # max seconds,frequency per second convert tp percentage
    local title="PROGRESS: " timing=$(date +%s) bckgrnd="$(tput setab 2; tput setaf 7)"
-   declare -i STOP=0
+   declare -i STOP=0 VAL=1
    function BAR::stop() {
        STOP=1
    }
@@ -328,34 +329,43 @@ function BAR::PRINT() {
       printf -v bar "%$((cur*cols/($percent*100)+1))s" " "
       if (( ${#bar} > cols ))
       then
-          if (( ${#bar} > cols+5 ))
+          if (( cur > (percent*110+step) ))
           then
               bckgrnd="$(tput setab 1; tput setaf 7)"
+	      VAL=3
           else
               bckgrnd="$(tput setab 181; tput setaf 0)"
+	      VAL=2
           fi
           max="${bckgrnd}$max"
           printf -v bar "%${cols}s" " "
       fi
+      # geberate bar to print
       bar=$(echo "${bar}" | sed -e 's/ /#/g')
       bar="$(printf "[%-${cols}s]" "$bar")"
       bar=$(echo "$bar" | sed 's/#/▇/g')
+      # print <title><bar><secs><max secs>
+      bar="$(tput sgr0; tput bold)$title $(tput setab 5; tput setaf 7)$bar $secs$(tput sgr0) $max"
 
-      BAR::printbar "$(tput sgr0; tput bold)$title $(tput setab 5; tput setaf 7)$bar $secs$(tput sgr0) $max"                 # Print left aligned info
+      BAR::printbar "$bar"
       sleep $(echo "scale = 2; 1/${3:-4}" | bc)
       cur+=$step
    done
+
    trap "" SIGINT SIGTERM
+   (( cur > (percent*120+step) )) && VAL=4
    printf -v bar "       Elapsed time: %d seconds" $(($(date +%s)-timing))
    sleep 1
    BAR::printbar "$(tput sgr0; tput bold)${bckgrnd}$bar"
    sleep 2                                 # give time to read
    BAR::printbar                           # empty line
-   return $STOP
+   return $VAL
 }
 
 # Show progress bar when notice level below N
 function BAR::STOP() {                     # stop progress bar
+    declare -i RTS=0                       # subshell return value
+    # To Do: should use percentage
     if [ -n "$BARtiming" ] ; then BARtiming=$(($(date +%s) - $BARtiming - 2)) ; fi
     if [ -n "$1" ] && [ -n "$BARtiming" ] && (( "$BARtiming" >= 0 ))
     then 
@@ -364,12 +374,16 @@ function BAR::STOP() {                     # stop progress bar
     if [ -n "$BARrunning" ]
     then
         skill $BARrunning
-	local INTIME=None
-        wait -n -p INTIME $BARrunning      # wait on dying subshell and collect results
+	local SUBpid
+        wait -n -p SUBpid $BARrunning      # wait on dying subshell and collect results
+	# undefined 0, 1: time<=100%, 2: time<110%, 3: time<120%, 4: time>=120%
+	RTS=$? ; (( $RTS >= 127 )) && RTS=0 # interrupted
+	#echo "Subshell exited with value: $RTS, subshell pid: ${SUBpid:-undefined}."
 	unset BARrunning
     fi
     tput el                                # clear progress bar
     unset BARtiming
+    return ${RTS}
 }
 
 # on exit close bar virtual window on bottom window
@@ -378,7 +392,7 @@ function BAR::RESET(){
     CURSOR_POS posyx
     tput csr 0 $(($(tput lines)-1))        # Reset scroll region
     tput rmcup                             # Exit alternate screen
-    tput cnorm a                           # Restore coloring
+    tput cnorm                             # Restore coloring
     unset BARinit
     #[ "${MSG,,}" = debug ] &&  echo "BAR::RESET called" >${VERBOSE}
     CLEANUP
@@ -1634,23 +1648,24 @@ function CHECK_FREESPACE() {
     declare -i FREE=200
     # default minimal free space available for package CNTR (default HAS)
     # (too) simple detect used disk partition for the containers
-    ROOTDEV="$(dirname $DOCKERDIR)"
-    ROOTDEV=$(mount | awk "/ on \\/ / || / on ${ROOTDEV//\/.} /{ print \$1 ; exit 0; }")
-    if ( $? > 0 ) || [ -z "${ROOTDEV}" ] || [ -n "${ROOTDEV/\/dev\/*/}" ]
+    ROOTDEV="$(dirname "${DOCKERDIR}")"
+    ROOTDEV=$(mount | grep " on ${ROOTDEV// /.} " | cut -d ' ' --fields=1)
+    [ -z "$ROOTDEV" ] && ROOTDEV=$(mount | grep ' on / ' | cut -d ' ' --fields=1)
+    if (( $? > 0 )) || [ -z "${ROOTDEV}" ] || [ -n "${ROOTDEV/\/dev\/*/}" ]
     then
-	    MESSAGE WARNING "Unable to detect (root) disk for docker."
+	MESSAGE WARNING "Unable to detect (root) disk for docker."
         return 0
     fi
-    FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME ${ROOTDEV} | \
+    FREE=$(lsblk -b -o FSSIZE,FSUSED,PARTTYPENAME "${ROOTDEV}" | \
 	    awk '/Linux/{printf("%d\n",($1-$2)/1100000); exit 0 ;}' )
-    if [ -z "$FREE" ] || (( $FREE == 0 ))
+    if [ -z "${FREE}" ] || (( ${FREE} == 0 ))
     then
         MESSAGE INFO "Cannot detect enough space (not Linux disk type)."
-	    return 0
+	return 0
     fi
     if [ -n "$2" ]                        # used by exploring used disk space
     then
-	    printf -v "$2" "%d" ${FREE}
+	printf -v "$2" "%d" ${FREE}
     fi
     # needed disk space in MB
     [ -n "${DOCKERS[${CNTR}]}" ] && [ -n "${DOCKERS[${CNTR},MEM]/+*/}" ] && \
@@ -1658,7 +1673,7 @@ function CHECK_FREESPACE() {
     if (( $FREE < $MINIMAL ))
     then
         MESSAGE WARNING "Free disk space ($FREE MB) is not enough (need ${DOCKERS[${CNTR},MEM]} MB) running the container ${CNTR}."
-	    return 1
+	return 1
     fi
     return 0
 }
@@ -1844,7 +1859,7 @@ function STOP_CONTAINER(){
         if ${SUDO}docker ps --format "{{.Names}}" | grep -q "${ONE}"
         then
             MESSAGE INFO "Stopping container '$ONE' ..."
-            if ! ${SUDO}docker stop "${ONE}" >/dev/null
+            if ! ${SUDO}docker stop "${ONE}" 2>1 >/dev/null
             then
                 MESSAGE WARNING "Unable to stop container '${ONE}'."
                 continue
@@ -1885,14 +1900,15 @@ function REMOVE_IMAGE(){
         IMAGE=$(${SUDO}docker image ls --all --format table 2>/dev/null | awk -v CNT=0  "/${ONE:-UNKOWN}/{ if( CNT++ == 0) { print \$3; }} END { if( CNT > 1) { exit(CNT); }}") 
         if (( $? > 1 )) && [ -n "$IMAGE" ]
         then
-            MESSAGE WARNING "Found more as one image with name like '$ONE.\nUsing only $IMAGE id."
+            MESSAGE WARNING "Found more as one image with name like '$ONE'.\nUsing '$IMAGE' id."
         fi
         if [ -n "$IMAGE" ]
         then
-            MESSAGE INFO "Removing docker container name '${ONE}' with image '${IMAGE}' from docker configuration."
-            if ! ${SUDO}docker rmi ${IMAGE}  # remove image
+            if ! ${SUDO}docker rmi ${IMAGE} 2>&1 >/dev/null  # remove image
             then
                 MESSAGE WARNING "Unable to remove container image for '${ONE}'."
+	    else
+	        MESSAGE INFO "Removed docker container '${ONE}' (image '${IMAGE}') from docker."
             fi
         else
             MESSAGE WARNING "Unable to find image for of docker container $CNTR."
@@ -2361,11 +2377,12 @@ function ADD_CONTAINER(){
 # Use envirionment variable DEBUG=log to run in interactive logging modus. Default: detached.
 # Use environment variable DEBUG=bash to run in interactive bash commands modus.
 DEBUG=$DEBUG       # for logging and bash interactive modus.
-if ${SUDO}docker ps --all --format 'table {{.Names}}' | grep -q ${CNTR}
+if grep -q -P "^docker:.*[:,]$USER(,.*)*$" /etc/group ; then SUDO= ; else SUDO="sudo " ; fi
+if \${SUDO}docker ps --all --format 'table {{.Names}}' | grep -q ${CNTR}
 then    # if container is available, remove it
     echo "Container ${CNTR} is already available! Container is stopped and removed." >>$VERBOSE
-    ${SUDO}docker stop ${CNTR} >/dev/null # if running stop it
-    ${SUDO}docker rm ${CNTR} >/dev/null
+    \${SUDO}docker stop ${CNTR} 2>1 >/dev/null # if running stop it
+    \${SUDO}docker rm ${CNTR} 2>1 >/dev/null
 fi
 # Run container '${CNTR}' command:"  or use docker compose.yaml file
 if [ -f "${DOCKERS[$CNTR,HOME]}/compose.yaml" ]
@@ -2378,7 +2395,7 @@ then
     else
         echo "Run container $CNTR in detached modus via CLI 'docker compose'." >>$VERBOSE
     fi
-    ${SUDO}docker ${CNTR^^}_SERVER_ENABLED=true compose -f ${DOCKERS[$CNTR,HOME]}/compose.yaml up \$MODUS
+    ${CNTR^^}_SERVER_ENABLED=true \${SUDO}docker compose -f ${DOCKERS[$CNTR,HOME]}/compose.yaml up \$MODUS
 else
     # docker will be run default deamonized with: run --detach and --restart arguments:
     MODUS="--detach --restart=unless-stopped"
@@ -2389,7 +2406,7 @@ else
     else
         echo "Running container $CNTR in detached modus via CLI 'docker run'." >>$VERBOSE
     fi
-    ${SUDO}docker run \$MODUS \\
+    \${SUDO} docker run \$MODUS \\
 EOF
     # collect  and add docker run command options
     CMD_RUN_CNTR ${CNTR}  | awk '{ printf("    %s \\\n",$0);}' >>${TMP_DIR}/run_command
@@ -2428,6 +2445,7 @@ EOF
         done
 	chmod +x ${TMP_DIR}/run_command
 	${SUDO:-sudo} mv -i ${TMP_DIR}/run_command ${DOCKERS[$CNTR,HOME]}/setup.sh
+	${SUDO:-sudo} chown root:docker ${DOCKERS[$CNTR,HOME]}/setup.sh
         MESSAGE DEBUG "Run container '${CNTR}' CLI command: ${DOCKERS[$CNTR,HOME]}/setup.sh"
     fi
     rm -f $TMP_DIR/run_command
@@ -2435,8 +2453,13 @@ EOF
     # generate docker compose file for docker compose up -f compose.yml -d
     if ${SUDO}docker compose alpha generate ${CNTR} 2>/dev/null >${TMP_DIR}/compose.yaml
     then
-	sed -i -e "/host_ip:/s/invalid IP/${HOSTIP}/" -e "/${CNTR}:/s//&\\n    container_name: ${CNTR}/" ${TMP_DIR}/compose.yaml
+	# set listening IP address:port to any IPV4
+	sed -i \
+		-e "/host_ip:/s/invalid IP/0.0.0.0/" \
+		-e "/${CNTR}:/s//&\\n    container_name: ${CNTR}/" \
+		${TMP_DIR}/compose.yaml
 	${SUDO:-sudo} mv ${TMP_DIR}/compose.yaml ${DOCKERS[$CNTR,HOME]}/compose.yaml
+	${SUDO:-sudo} chown root:docker ${DOCKERS[$CNTR,HOME]}/compose.yaml
 	MESSAGE NOTICE "Created docker (experimental) compose file: DOCKERS[$CNTR,HOME]/compose.yaml"
     fi
     MESSAGE NOTICE "Created and running docker container ${Blue}$CNTR${Reset}."
@@ -2490,9 +2513,11 @@ function PURGE_APP(){
     else
         for ONE in $CNTRS
         do
-            MESSAGE WARNING "Docker container and image '$ONE' will be purged from the system!"
-            REMOVE_IMAGE "${ONE,,}"
-            if [ $TYPE = delete ] ; then DELETE_CONTAINER "{ONE,,}" ; fi
+            if REMOVE_IMAGE "${ONE,,}"
+	    then
+                MESSAGE WARNING "Docker '$ONE' container and image are purged!"
+                if [ $TYPE = delete ] ; then DELETE_CONTAINER "{ONE,,}" ; fi
+            fi
         done
     fi
     # no containers left purge docker installation
@@ -2637,12 +2662,12 @@ while [ -n "${1}" ]
 do                                             # maintenance actions
     case "${1,,}" in
         purge|delete)                          # purge/delete containers and services
-            _="${1,,}" ; shift
+            T="${1,,}" ; shift
             while [ -n "${1,,}" ]
             do
                 if [ -n "${1,,}" ]
                 then 
-                    if ! PURGE_APP ${_} "${1,,}" ; then exit 1 ; fi
+                    if ! PURGE_APP ${T} "${1,,}" ; then exit 1 ; fi
                     shift
                 fi
             done
@@ -2650,17 +2675,17 @@ do                                             # maintenance actions
         ;;
         dump|archive)          # create a tar archive of local container data
 	    shift
-	    if [ "${1,,}" = all ] ; then _=$(ls ${DOCKERSDIR}/ 2>/dev/null) ; else _="$@" ; fi
-	    for _ in ${_}
+	    if [ "${1,,}" = all ] ; then T=$(ls ${DOCKERSDIR}/ 2>/dev/null) ; else T="$@" ; fi
+	    for F in ${T}
             do
-                if [ -n "${_}" ]
+                if [ -n "${F}" ]
                 then
-	            if ! ARCHIVE ${_}
+	            if ! ARCHIVE ${F}
 	            then
-	                 MESSAGE ERROR "Failed to archive data of ${_} container(s)."
+	                 MESSAGE ERROR "Failed to archive data of ${F} container(s)."
 	                 exit 1
 	            else
-			 MESSAGE OK "$1 local data of container ${_}"
+			 MESSAGE OK "$1 local data of container ${F}"
 	            fi
 	         fi
 	    done
@@ -2668,18 +2693,18 @@ do                                             # maintenance actions
 	;;
         restore)                                # restore local container data
 	    shift
-	    if [ "${1,,}" = all ] ; then _=$(ls ${DOCKERSDIR}/ 2>/dev/null) ; else _=$@ ; fi
+	    if [ "${1,,}" = all ] ; then T=$(ls ${DOCKERSDIR}/ 2>/dev/null) ; else T=$@ ; fi
 	    GET_ARCHIVED
-	    for _ in ${_}
+	    for F in ${T}
 	    do
-	        if [ -n "${_}" ]
+	        if [ -n "${F}" ]
                 then
-		     if ! RESTORE "${_}"
+		     if ! RESTORE "${F}"
 		     then
-			 MESSAGE ERR "Unable to find backup data file or not supported container ${_}. Skipped."
+			 MESSAGE ERR "Unable to find backup data file or not supported container ${F}. Skipped."
 		     else                       # and install/update container
-			 ADD_ITEM ${_}
-			 MESSAGE OK "Restored local data for containet $_"
+			 ADD_ITEM ${F}
+			 MESSAGE OK "Restored local data for containet $F"
 		     fi
 		fi
 	    done
@@ -2769,7 +2794,7 @@ then
 fi
 if (( $RTS > 0 ))
 then
-    MESSAGE ERR "Unable to install/update one of $RTS services and docker containers."
+    MESSAGE INFO "Unable to install/update ${RTS} of the ${#INSTALLED[@]} services and docker containers."
 fi
 #MESSAGE STATE "FINISHED"
 exit $RTS
