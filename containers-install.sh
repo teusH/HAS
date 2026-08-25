@@ -26,13 +26,26 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.16 $ $Date: 2026/08/19 20:35:37 $' | awk '{ printf("V%s_%s", $2,$5);}')
-SCRIPT=$0
+VERSION=$(echo  '$Revision: 3.21 $ $Date: 2026/08/25 19:41:18 $' | awk '{ printf("V%s_%s", $2,$5);}')
+SCRIPT=$0                            # name of the script
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
+HOSTIP=""                            # server ip address for container webUI access
+function HOSTIP() {
+   if [ -n "$HOSTIP" ] ; then echo "$HOSTIP" ; return 0 ; fi
+   HOSTIP=$(ifconfig | awk '/inet 1[09]/{ print $2; }' | sort -r | head -1)
+   if ! echo "${HOSTIP:-localhost}" | grep -q -P '([0-9]{1,3}\.){3}[0-9]{1,3}'
+   then
+       echo localhost ; HOSTIP=localhost
+       return 1
+   fi
+   return 0
+}
+HOSTIP
+
 
 # define default logging level
-MSG=NOTICE                              # defaut message level: be very versatyle
+MSG=NOTICE                           # defaut message level: be very versatyle
 # debug mode. Echo only the actions. Just for security
 if [ -n "${DEBUG}" ]                 # define 'DEBUG=echo' : showing all bash commands
 then
@@ -42,7 +55,7 @@ fi
 # check if there is a controlling tty
 function TTY() {                     # disable coloring and progress metering
     ([ -z "${MSG/DEBUG/}" ] || [ -z "$(tty)" ] ) && return 1
-    return 0                              # if no /dev/tty (no xterm) disable as well
+    return 0                         # if no /dev/tty (no xterm) disable as well
 }
 # check if text coloring and cursor management can be used
 function XTERM() {
@@ -87,7 +100,9 @@ then
     SUDO=
 fi
 # installion logging file 
-TMP_DIR=$(mktemp -d /var/tmp/DocInst_XXXXXXXXXX) # directory for temporary files
+TMP_DIR=$(mktemp -d /var/tmp/DocInst_XXXXXXXXXX)  # directory for temporary files
+TMP_LOG="./LOG-RUN_${0/%\.sh/.log}"               # save logging of the work done
+if [ -s "$TMP_LOG" ] ; then rm -f "$TMP_LOG" ; fi # clean up
 
 # just to make messages and logging colorfull
 # some tput options
@@ -114,16 +129,16 @@ if XTERM ; then                       # text coloring van be used
     Under="$(tput smul)"              # Underlined
     Bold="$(tput bold)"               # bold
     Unbold="\033[22m"                 # bold off
-    Black="${Bold}$(tput setaf 0)"    # Black
-    Red="${Bold}$(tput setaf 1)"      # Red
-    Green="${Bold}$(tput setaf 2)"    # Green
-    Yellow="${Bold}$(tput setaf 3)"   # Yellow
+    Black="${Bold}$(tput setaf 16)"   # Black
+    Red="${Bold}$(tput setaf 196)"    # Red
+    Green="${Bold}$(tput setaf 22)"   # Green
+    Yellow="${Bold}$(tput setaf 226)" # Yellow
     Blue="${Bold}$(tput setaf 4)"     # Blue
     Purple="${Bold}$(tput setaf 125)" # Purple
     Cyan="${Bold}$(tput setaf 6)"     # Cyan
-    White="${Bold}$(tput setaf 7)"    # White
+    White="${Bold}$(tput setaf 15)"   # White
     Gray="${Bold}$(tput setaf 8)"     # Gray
-    RedWhite="$(tput setab 2)${Bold}${White}" # bold white on red
+    RedWhite="$(tput setab 196)${Bold}${White}" # bold white on red
     # reset
     Reset="$(tput sgr0)"              # Text color reset
 fi
@@ -166,27 +181,24 @@ function CLEANUP() {
   [ -n "$BARinit" ] && BAR::RESET          # should not happen
   (( ${#INSTALLED[@]} > $RTS )) && MESSAGE OK "INSTALLED and UPDATED: $((${#INSTALLED[@]} - $RTS))"
   (( $RTS > 0 )) && MESSAGE ERROR "FAILED to install or update: $RTS))"
+  if [ -f "$TMP_LOG" ] ; then echo "Installation logging saved in $TMP_LOG." >$VERBOSE ; fi
 }
 trap CLEANUP EXIT                          # on exit cleanup saved messages
 trap CLEANUP::failure INT TERM             # on interupt reset terminal
 
 # info and logging handler, be verbose of what is going on
 declare -A LEVEL                           # information level for messages
-LEVEL[EMERG]=7
-LEVEL[ALERT]=6
-LEVEL[CRIT]=5
-LEVEL[ERR]=4
-LEVEL[WARNING]=3
-LEVEL[NOTICE]=2
-LEVEL[INFO]=1                              # default
-LEVEL[DEBUG]=0
-LEVEL[ALL]=0
-LEVEL[QUIET]=3                             # errors and higher level
+LEVEL=( [EMERG]=7 [ALERT]=6 [CRIT]=5 [ERR]=4 [WARNING]=3 [NOTICE]=2 [INFO]=1 [DEBUG]=0
+	[ALL]=0 [QUIET]=3 )
+
 # messages show unprioritized messages or per priority level logging messages
 # args: level, messages ...
 function MESSAGE() {
     [ -n "$2" ] || [ -n "$1" ] || return 0 # skip empty messages
     local STR=${2} L=$1
+    function clearESCs() {                 # remove tput coloring
+	sed -e 's/[^[:print:]]\[[0-9;]*m*//g' -e 's/[^[:print:]](B//g'
+    }
     if [ -z "$2" ] ; then L=ALL ; fi
     if [ -z "${LEVEL[$L]}" ]
     then                                   # state of script progress messages
@@ -213,6 +225,7 @@ function MESSAGE() {
         done
         return 0
     fi
+
     case ${LEVEL[${L^^}]:-None} in         # set color level and message
 	7) L="${RedWhite}${L^^}${Reset}"
 	   STR="${Red}${Bold}${STR}${Reset}"
@@ -241,11 +254,12 @@ function MESSAGE() {
     if (( ${LEVEL[${1^^}]:-1} >= ${LEVEL[$MSG]:-4} ))   # level of publishing / versability level
     then
        echo -e "${L}: $STR" >>${VERBOSE}
+       logger --skip-empty --priority user.${1,,} --stderr --no-act --tag "${SCRIPT/%\.sh/}.$1" "$(echo -e "$L: $STR" | clearESCs)" 2>>${TMP_LOG}  
     fi
     # stop if level is equal or higher as critical level
     if (( ${LEVEL[$1]:-1} >= ${LEVEL[CRIT]:-5} )) # level of critical messages
     then
-       #MESSAGE FAULT "EXITING ON ERRORS"
+       MESSAGE ERR "EXITING ON ERRORS"
        exit 1
     fi
 }
@@ -261,8 +275,9 @@ function ERRORS() {
     fi
     [ ! -s ${TMP_DIR}/"$F" ] && return 0
     rm -f ${TMP_DIR}/"$F"
-    read -p "ERRORS Hit just hit enter key to continue." -s -t 30 ANONIMOUS || \
+    read -p "${Red}ERRORS${Reset} Hit just ${Blue}${Under}hit enter key to continue${Reset}." -s -t 30 ANONIMOUS || \
 	    MESSAGE EMERG "DISCONTINUED. Exiting."
+    echo -e "$(tput cuu 1; tput el)" >$VERBOSE
     return 0
 }
 
@@ -273,27 +288,21 @@ function ERRORS() {
 # Home Assistant configuration
 # starts as deamon with default arguments restart:always, name, TimeZone, docker socket
 
-HOSTIP=""                                # server ip address for container webUI access
-function HOSTIP() {
-   if [ -n "$HOSTIP" ] ; then echo "$HOSTIP" ; return 0 ; fi
-   HOSTIP=$(ifconfig | awk '/inet 1[09]/{ print $2; }' | sort -r | head -1)
-   if ! echo "${HOSTIP:-localhost}" | grep -q -P '([0-9]{1,3}\.){3}[0-9]{1,3}'
-   then
-       echo localhost ; HOSTIP=localhost
-       return 1
-   fi
-   return 0
-}
-HOSTIP
-
+# #######################  START progressBAR.sh routines to implement progress BAR:
 # progress bar process
 # print in virtual bottum window progress messages
 # arg1 max seconds, arg2 prints per second, arg3 if TIMING print elapsed time
 # arg3/4 use different title progress bar
 function BAR::PRINT() {
-   declare -i percent=100
-   declare -i cur=0 step=$((10000/(${2:-60}+1)/(${3:-4}+1)))
-   # max seconds,frequency per second convert tp percentage
+   declare -i percent=100 secs=${2:-60} freq=${3:-4} cur=0 step=0
+   (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
+   (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710 - 5*secs)/70 ))
+   # max seconds,frequency per second convert step to percentage
+   step=$((10000/(${secs}+1)/(${freq}+1)))
+   local slp_time=$(bc <<< "scale = 2; 1/${freq}")
+   # max seconds,frequency per second convert step to percentage
+   step=$((10000/(${secs}+1)/(${freq}+1)))
+   local slp_time=$(bc <<< "scale = 2; 1/${freq}") cursecs=0
    local title="PROGRESS: " timing=$(date +%s) bckgrnd="$(tput setab 2; tput setaf 7)"
    declare -i STOP=0 VAL=1
    function BAR::stop() {
@@ -321,39 +330,42 @@ function BAR::PRINT() {
    do
       (( $STOP == 1 )) && break   # stop bar stepping up
       declare -i  cols=$(tput cols)
-      local bar secs max
-      secs="$(echo "scale = 1; $cur*${2:-60}/($percent*100)" | bc)s"
-      max="(max ${2:-60}s)"
+      local bar max
+      max="(max ${secs}s)"
 
-      cols=$((cols-${#title}-${#secs}-${#max}-6))
+      cols=$((cols-${#title}-${#cursecs}-${#max}-7))
       printf -v bar "%$((cur*cols/($percent*100)+1))s" " "
+      cur+=${step}                        # current percentage done
+      # prepair to print the progress bar
       if (( ${#bar} > cols ))
       then
-          if (( cur > (percent*110+step) ))
+          #if (( cur > (percent*110+step) ))
+	  if (( $( bc <<< "$cursecs > $secs*1.1") > 0 ))
           then
               bckgrnd="$(tput setab 1; tput setaf 7)"
-	      VAL=3
+              VAL=3
           else
               bckgrnd="$(tput setab 181; tput setaf 0)"
-	      VAL=2
+              VAL=2
           fi
           max="${bckgrnd}$max"
           printf -v bar "%${cols}s" " "
       fi
-      # geberate bar to print
-      bar=$(echo "${bar}" | sed -e 's/ /#/g')
-      bar="$(printf "[%-${cols}s]" "$bar")"
-      bar=$(echo "$bar" | sed 's/#/▇/g')
+      bar=$(echo "${bar}" | sed -e 's/ /#/g')  # color the bar
+      bar="$(printf "[%-${cols}s]" "${bar}")"
+      bar=$(echo "${bar}" | sed 's/#/▇/g')
       # print <title><bar><secs><max secs>
-      bar="$(tput sgr0; tput bold)$title $(tput setab 5; tput setaf 7)$bar $secs$(tput sgr0) $max"
+      bar="$(tput sgr0; tput bold)${title} $(tput setab 5; tput setaf 7)${bar} ${cursecs}s$(tput sgr0) ${max}"
 
-      BAR::printbar "$bar"
-      sleep $(echo "scale = 2; 1/${3:-4}" | bc)
-      cur+=$step
+      BAR::printbar "${bar}"              # print progress bar
+      sleep ${slp_time}                   # sleep a little while
+      cursecs=$(bc <<< "scale = 1; ($cursecs + $slp_time)*1.0")
    done
 
+   # ending the bar printing loop and subshell process
    trap "" SIGINT SIGTERM
-   (( cur > (percent*120+step) )) && VAL=4
+   #(( cur > (percent*120+step) )) && VAL=4
+   (( $(bc <<< "$cursecs > ($secs*1.2)") > 0 )) && VAL=4
    printf -v bar "       Elapsed time: %d seconds" $(($(date +%s)-timing))
    sleep 1
    BAR::printbar "$(tput sgr0; tput bold)${bckgrnd}$bar"
@@ -362,12 +374,16 @@ function BAR::PRINT() {
    return $VAL
 }
 
-# Show progress bar when notice level below N
+# show progress bar when notice level below N
 function BAR::STOP() {                     # stop progress bar
-    declare -i RTS=0                       # subshell return value
+    local INTIME=""
+    declare -i RTS=0 # subshell exit value
     # To Do: should use percentage
-    if [ -n "$BARtiming" ] ; then BARtiming=$(($(date +%s) - $BARtiming - 2)) ; fi
-    if [ -n "$1" ] && [ -n "$BARtiming" ] && (( "$BARtiming" >= 0 ))
+    if [ -n "$BARtiming" ]
+    then
+	BARtiming=$(bc <<< "($(date +%s.%2N) - $BARtiming +1)/1.0")
+    fi
+    if [ -n "$1" ] && [ -n "$BARtiming" ]
     then 
 	printf -v "$1" "%d" "$BARtiming"
     fi
@@ -375,7 +391,7 @@ function BAR::STOP() {                     # stop progress bar
     then
         skill $BARrunning
 	local SUBpid
-        wait -n -p SUBpid $BARrunning      # wait on dying subshell and collect results
+	wait -n -p SUBpid $BARrunning       # wait on dying subshell and collect results
 	# undefined 0, 1: time<=100%, 2: time<110%, 3: time<120%, 4: time>=120%
 	RTS=$? ; (( $RTS >= 127 )) && RTS=0 # interrupted
 	#echo "Subshell exited with value: $RTS, subshell pid: ${SUBpid:-undefined}."
@@ -389,128 +405,257 @@ function BAR::STOP() {                     # stop progress bar
 # on exit close bar virtual window on bottom window
 function BAR::RESET(){
     BAR::STOP
-    CURSOR_POS posyx
     tput csr 0 $(($(tput lines)-1))        # Reset scroll region
     tput rmcup                             # Exit alternate screen
-    tput cnorm                             # Restore coloring
+    tput cnorm                             # Restore cursor exit 0
     unset BARinit
-    #[ "${MSG,,}" = debug ] &&  echo "BAR::RESET called" >${VERBOSE}
+    #echo "call CLEANUP from BAR::RESET" >>@@
     CLEANUP
 }
 
 # progress bar initiated
 function BAR::INIT() {
-    # do not run if no terminal is attached or  already initiated
-    ( ! TTY ) && return 0                  # no xterm
-    [ -n "$BARinit" ] && return 0
+   #local posyx
+   # do not run if no terminal is attached or  already initiated
+   if ! echo $TERM | grep -q xterm || (( ${LEVEL[$MSG]:-3} >= ${LEVEL[QUIET]:-5} )) || ! [ -t 2 ]
+   then return 0
+   elif [ -n "$BARinit" ] ; then return 0
+   fi
 
-    tput csr 0 $(($(tput lines)-2))        # initiate virtual window
-    tput clear
-    printf "%-$(($(tput cols)-2))s" " "    # Print left aligned info
-    trap BAR::RESET SIGINT SIGTERM EXIT
-    BARinit="true"
-    unset BARrunning
-    return 0
+   #CURSOR_POS posyx
+   #echo "BAR::INIT Cursor position: $posyx" >>@@
+   tput csr 0 $(($(tput lines)-2))         # initiate virtual window
+   #tput cup $((${posyx/[;:]*/}-1)) 2 ; tput el
+   tput clear
+   #tput setab 4; tput setaf 7  # Blue background, white text
+   printf "%-$(($(tput cols)-2))s" " "     # Print left aligned info
+   trap BAR::RESET SIGINT SIGTERM EXIT
+   BARinit="true"
+   unset BARrunning
+}
+
+# guess the speed of sytem. return recalculated seconds related to RPi 5 in arg2 variable
+# # algorithm: (50% connection speed, 50% RPi model speed) * (secs/package)*(nr packages).
+# To Do: ref is RPi5 B, 8Mb mem, UTP connection and SD card
+function BAR::secs() {
+    declare -i FACTOR=100 ; local NET
+    # adjust to RPi model RPi4 (model B)
+    [ -f /proc/device-tree/model ] && ( od --strings /proc/device-tree/model | grep -q 'Pi 4') && FACTOR=350
+    # adjust to internet connectivity
+    NET=$(netstat -i | grep -P -e '^(eth|enp|wlan)' | awk '{ if( $3 > 0 ) { print $1} }')
+    if   echo "${NET}" | grep -q  -P "^(eth|enp)" ; then FACTOR+=100
+    elif echo "${NET}" | grep -q "wlan" ; then FACTOR+=200
+    else MESSAGE INFO "No internet connection: download packages delay neglected."
+    fi
+    printf -v "$2" "%d" $(( FACTOR*${1}/200 ))
 }
 
 # show progress if run from terminal
 # arg 1: max time setting in sec, arg2 freq per second 1..9,
 # arg3/4: title, arg3: if arg3=TIMING
 # do not show when level is high
-function BAR::START() {                      # start bar args: max sec, freq/sec, title, [TIMING]
-    BAR::INIT
-    BAR::PRINT "${1:-  }" ${2:-60} ${3:-3} & # START USR1 SIGNALER freq 3 per sec
-    BARrunning=$!
-    BARtiming=$(date +%s)
-    echo
-    return 0
+function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIMING]
+   declare -i secs=${2:-60} freq=3
+   BARtiming=$(date +%s.%2N)
+   BAR::secs ${secs} secs
+   (( secs < 4 )) && return 0                  # time too short for a progress bar
+   (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
+   (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710 - 5*secs)/70 ))
+   BAR::INIT
+   BAR::PRINT "${1:-  }" ${secs} ${freq} &    # start USR1 signaler freq 3 per sec
+   BARrunning=$!
+   echo
+   return 0
 }
-# use:
-# BAR::START title expectedTmeSecsDft60 frequencyPerSecondDflt4
-# BAR::STOP timing
+# #######################  END of progress BAR package
+
+# guess the speed of sytem. return recalculated seconds related to RPi 5 in arg2 variable
+# # algorithm: (50% connection speed, 50% RPi model speed) * (secs/package)*(nr packages).
+# To Do: ref is RPi5 B, 8Mb mem, UTP connection and SD card
+function BAR::secs() {
+    declare -i FACTOR=100 ; local NET
+    # adjust to RPi model RPi4 (model B)
+    [ -f /proc/device-tree/model ] && ( od --strings /proc/device-tree/model | grep -q 'Pi 4') && FACTOR=350
+    # adjust to internet connectivity
+    NET=$(netstat -i | grep -P -e '^(eth|enp|wlan)' | awk '{ if( $3 > 0 ) { print $1} }')
+    if   echo "${NET}" | grep -q  -P "^(eth|enp)" ; then FACTOR+=100
+    elif echo "${NET}" | grep -q "wlan" ; then FACTOR+=200
+    else MESSAGE INFO "No internet connection: download packages delay neglected."
+    fi
+    printf -v "$2" "%d" $(( FACTOR*${1}/200 ))
+}
+
+# show progress if run from terminal
+# arg 1: max time setting in sec, arg2 freq per second 1..9,
+# arg3/4: title, arg3: if arg3=TIMING
+# do not show when level is high
+function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIMING]
+   declare -i secs=${2:-60} freq=3
+   BARtiming=$(date +%s.%2N)
+   BAR::secs ${secs} secs
+   (( secs < 4 )) && return 0                  # time too short for a progress bar
+   (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
+   (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710 - 5*secs)/70 ))
+   BAR::INIT
+   BAR::PRINT "${1:-  }" ${secs} ${freq} &    # start USR1 signaler freq 3 per sec
+   BARrunning=$!
+   echo
+   return 0
+}
+
+# ###########################
+# filter output and log
+function SHOW() {
+    # function [ArchiveFileName priority filter channel, dflts: /dev/null 
+    local log=${1:-/dev/null} priority=${2:-ERR} filter=cat channel=$VERBOSE
+    shift ; shift
+    while  [ -n "$1" ]
+    do
+       case "$1" in
+       filter=*)   filter="${1/*=//}"
+       ;;
+       channel=*)  channel="${1/*=//}"
+       ;;
+       log=*)   log="${1/*=//}"
+       ;;
+       priority=*) priority="${1/*=//}"
+       ;;
+       esac
+       shift
+    done
+    if ! type -t ${filter} 2>/dev/null ; then filter=cat ; fi    # make sure filter function exists
+    # priority level -> priority
+    if [ -z "${LEVEL[${priority:-undef}]}" ] ; then  channel=/dev/null ; filter=cat ; output=/dev/null
+    elif (( ${LEVEL[${priority}]:-10} < ${LEVEL[${MSG^^}]:-4} ))   # level of publishing / versability level
+    then channel=$VERBOSE
+    else display=/dev/null ; filter=cat
+    fi
+    [ "$log" != /dev/null ] && [ -d "${TMP_DIR}" ] && log="$TMP_DIR/$log"
+    tee -a "$log" | $filter >"$channel"
+    return $?
+}
 
 # check if system needs to be updated. Update if last update was older as a week ago
 function UPDATE_SYSTEM() {
-   declare -i RTS=0 CNT=0 ; local DELAY
+   declare -i RTS=0 CNT=0 ; local delay
+   # filter function
+   function APT::filter() {
+       awk '
+        BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 }
+        /Ophalen:[0-9]/||/afhandelen van triggers/ { item = $0;
+            sub("^.*Ophalen:.*","Ophalen",item);
+            sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
+        }
+        /Ophalen:[0-9]/||/^Uitpakken/||/^Instellen/||/afhandelen van triggers/{
+        system("sleep 0.2");
+            if ( item == "" ) { item = $1; gsub(":","",item)}
+            if( item == cur ) { printf("\r%s: %d", item, ++cnt)}
+            else { cur = item; cnt = 0; printf("\n%s: %d", item, ++cnt)}
+            item = "" ; prt = 0;
+        }
+        /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
+        /^Adding boot/||/^[dD]one/ {  printf("\n"); prt = 1}
+        { if( prt ) print}
+        END { printf("timing: %d seconds\n",(systime() - timing))}
+       '
+   }
    # full-upgrade: basic plus hold packages incl removal
    function UPGRADE() {                      # arg1: type (upgrade or full-upgrade
-       local TYPE ANS=no ; declare -i NR=${2:-0}
+       # returns 1 on failure                # arg2: nr onhold
+       local type ans=no delay
+       declare -i nr=0 timing=0 onhold=0
+       printf -v "${2:-fake}" "0:0"          # none
+       type=${1,,} ; sudo true               # sudo cache update
        case ${1,,} in
-	   full-upgrade|upgrade) TYPE=${1,,}
+       full-upgrade|upgrade)
+           nr=$(${SUDU:-sudo} apt list --upgradeable 2>/dev/null | grep --count '/')
            ;;
-           *) return 1                       # type not supported
-	   ;;
+       autoremove)
+	   # auto remove returns #upgraded, #installed, #removable, #upgradeable
+	   nr=$(${SUDU:-sudo} apt-get autoremove --no-act --quiet 2>/dev/null | sed -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | cut -d ';' -f 3)
+           ;;
+       *) return 1                          # type not supported
+           ;;
        esac
-       [ "${TYPE,,}" != full-upgrade ] && TYPE="upgrade"
-       [ "${TYPE,,}" = full-upgrade ] && TYPE="full-upgrade"
-       (( ${NR} <= 0 )) && return 0          # nothing to do
-       if TTY
+       (( ${nr} <= 0 )) && return 0         # nothing to do
+       printf -v "${2:-fake}" "%d:0" $nr
+
+       MESSAGE NOTICE "Trying to ${type/full-/fully} ${nr} OS system packages."
+       local mysecs ; BAR::secs $(($nr*2)) mysecs
+       delay="$(( $mysecs/60 )) minutes $(( $mysecs % 60 )) seconds,"
+       (( ($mysecs/60 +1) > 6 )) && \
+	       MESSAGE WARN    "Can take $delay ..."
+       (( ($mysecs/60 +1) <=  2 )) && \
+	       MESSAGE INFO    "Can take $delay ..."
+       (( ($mysecs/60 +1) <=  6 )) && (( ($mysecs/60 +1) >  2 )) && \
+	       MESSAGE NOTICE "Can take $delay ..."
+       if TTY && [ "${type}" = upgrade ]
        then
-	   read -p "Hit enter key within 10 seconds to skip the OS ${TYPE^^}." -t "${T:-10}" ANS
-           (( $? > 0 )) && ANS=no
+	   read -p "Hit ${Blue}enter key${Reset} within 10 seconds to ${Blue}${Under}skip the OS ${type^^}${Reset}." -t "${T:-10}" ans
+           (( $? > 0 )) && ans=no
+	   echo "$(tput cuu 1; tput el)" >$VERBOSE
+       else ans=no
        fi
-       if [ "$ANS" = no ]                    # do not skip upgrade
+       if [ "$ans" = no ]                    # do not skip upgrade
        then
-           MESSAGE INFO "${TYPE/-/ } of ${Black}${Italic}$NR OS system packages${Reset}."
-	   BAR::START "OS ${TYPE^^}:" $(( ($NR*4)*130/100))
-           if ! ${SUDO:-sudo} apt-get --yes --quiet ${TYPE,,} >>${TMP_DIR}/OSupgrade   # no apt progress bar
-           then RTS=$? ; fi
-           BAR::STOP ANS
-           (( ${ANS:-0} > ( $(($NR*3/2)) + 60 ) )) && \
-               MESSAGE INFO "Increase OS system upgrading algorithm."
-           NR=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
-	   if (( $NR == 0 ))
+	   BAR::START "OS ${type^^}:" $(( ($nr*2)*115/100 ))
+	   if [ -z "${type/*upgrade*/}" ]
            then
-               MESSAGE NOTICE "OS system packages: ${TYPE}d ${NR} packages."
-	       INSTALLED[OSsystem]="System applications are up to date."
-           elif (( $NR != ${2:-0} ))
-	   then
-	       RTS=0        # hold packages create false error return
-	       MESSAGE NOTICE "${TYPE/-/ } OS system packages update: $NR are on hold."
-	       INSTALLED[OSsystem]="System applications are updated. $NR are on hold."
-           fi
+               ${SUDO:-sudo} apt-get --yes --quiet ${type,,} 2>/dev/null | \
+		       SHOW OSupgrade NOTICE filter="APT::filter"
+	   else
+	       ${SUDO:-sudo} apt autoremove --quiet 2>/dev/null | \
+		       SHOW OSupgrade NOTICE
+	   fi
+	   (( $? > 0 )) && rts=1             # errors
+           BAR::STOP timing
+	   (( rts == 1 )) && ERRORS OSupgrade && return 1
+	   (( ${timing:-0} > $mysecs )) && \
+               MESSAGE INFO "Increase OS system upgrading algorithm."
        fi
-       return $RTS
+       local fld=4 rest=0
+       fld=4 ; [ "${type}" = autoremove ] && fld=3
+       rest=$(${SUDU:-sudo} apt-get autoremove --no-act --quiet 2>/dev/null | sed -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | cut -d ';' -f ${fld})
+       printf -v "${2:-fake}" "%d:%d" $nr $rest
+       return 0
    }
 
-   MESSAGE DEBUG "Check if OS system needs to be updated."
-   # renew list of upgradable OS packages
-   #${SUDO:-sudo} apt-get --quiet update 2>/dev/null >/dev/null
-   CNT=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | \
-	   tee -a ${TMP_DIR}/OSupgrade | grep --count '.*')
-   if (( $CNT == 0 ))
+   MESSAGE STATE "Upgrading OS system packages"
+   # try a basic OS packages update
+   local todo rts=0
+   if UPGRADE upgrade todo                      # upgrade basic packages
    then
-       MESSAGE INFO "OS system is up to date."
-       rm -f ${TMP_DIR}/OSupgrade
-       return 0
-   fi
-   DELAY="a minute or less"
-   (( $CNT > 60 )) && DELAY="a few minutes" ; (( $CNT > 100 )) && DELAY="several minutes"
-
-   if (( $CNT > 0 ))                                # try a basic OS packages update
-   then
-       MESSAGE NOTICE "Upgrading OS system: ca $CNT applications.\nCan take $DELAY ..."
-       if UPGRADE upgrade ${CNT}                       # upgrade basic packages
+       local pkgs=${todo/:*/}
+       INSTALLED[OSsystem]="OS system is upgraded. ${todo/*:/} packages are upgradeable."
+       if (( ${todo/*:/} > 0 ))
        then
-           CNT=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
-	   (( ${CNT:-0} > 0 )) && UPGRADE full-upgrade $CNT # distribution upgrade OS pkgs
-	   if (( $? == 0 ))
+	   if UPGRADE full-upgrade todo
            then
-               CNT=$(${SUDO:-sudo} apt list --upgradeable 2>/dev/null | grep --count '.*')
-	       INSTALLED[OSsystem]="OS system is fully upgraded. $CNT on hold."
-               MESSAGE NOTICE "Removing OS system packages not longer needed"
-               if ${SUDO:-sudo} apt-get --yes autoremove  >>${TMP_DIR}/OSupgrade # remove unused packages
-               then
-	           INSTALLED[OSsystem]="OS system is up to date. Removed deprecated packages."
-		   MESSAGE OK "OS system is up to date"
-	       fi
+               INSTALLED[OSsystem]="OS system is fully upgraded. ${todo/*:/} packages are upgradeable."
+	   else
+	       rts=1
 	   fi
        fi
+       pkgs="${todo/:*/} of $(( $pkgs - ${todo/*:/} ))"
+       if UPGRADE autoremove todo
+       then
+	       INSTALLED[OSsystem]="${rts/0/Upgraded $pkgs packages. }Removed $(( ${todo/:*/} - ${todo/*:/} )) deprecated OS system packages."
+       else
+           rts=1
+       fi
+   else
+       ERRORS OSupgrade && MESSAGE SKIPPED "OS system upgrade not completed."
+       rts=1
    fi
-   (( $RTS > 0 )) && ERRORS OSupgrade && MESSAGE SKIPPED "OS system upgrade not completed"
+   if (( ${rts} == 0 ))
+   then MESSAGE OK "OS system is up to date."
+   else ERRORS OSupgrade && MESSAGE SKIPPED "OS system full upgrade not completed."
+   fi
    rm -f ${TMP_DIR}/OSupgrade
-   return 0
+   return $rts
 }
+
+# ###########################
 
 # #######################################################################
 # ******************* services and docker containter definitions ********
@@ -1085,7 +1230,7 @@ function CMD_RUN_CNTR() {
 	           INFO+="\nAdding group ${ID} for access to device."
 	           echo "--group-add=${ID}"
 	       fi
-	       if [  -z "$2" ]       ]              # add group kernel mapping
+	       if [  -z "$2" ]                      # add group kernel mapping
 	       then
 		   if ! grep -q ${ID} /etc/subgid
 		   then                      # this may need a system reboot to enable it
@@ -1518,7 +1663,7 @@ function INSTALL_DOCKER(){
         ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq
         BAR::STOP timing
 	(( ${timing:-0} > 7 )) &&
-		MESAGE INFO "Increase timing install docker add-ons to $timing."
+		MESSAGE INFO "Increase timing install docker add-ons to $timing."
     fi
 
     if ! [ -d "${DOCKERDIR}" ]      # check if docker containers directory exists
@@ -1601,6 +1746,7 @@ function INSTALL_MOSQUITTO() {
             else ANONIMOUS=false
             fi
         fi
+	echo "$(tput cuu 1; tput el)" >$VERBOSE
     fi
     # Another mosquitto service is running? E.g. multiple zigbee2mqtt services.
     # One may need to add bridge modus in the config file.
@@ -1749,7 +1895,7 @@ function GET_IMAGE(){
     # Return 2 if image was up to date. Return 4 on failure. Return 3 on image inspect error.
     for (( CNT=0; CNT < 2; CNT++ ))
     do
-	local M=$((${DOCKERS[${1},MEM]/+*/}*22/200))
+	local M=$((${DOCKERS[${1},MEM]/+*/}*22/400))
 	BAR::START "Pull $1 image:" ${M:-30}
         if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" >${TMP_DIR}/pull
         then                  # some repros e.g. go2rtc have caching problems. Try again.
@@ -2201,12 +2347,14 @@ function GET_ARCHIVED() {
            echo -e "${Red}$CNT${Reset}\t${FILE[$CNT]}" >>$VERBOSE
        done
        read -p "Enter which number? ${#FILE[@]} or enter path/filename or leave it blank (none): " -t 30 ANSWER
+       echo "$(tput cuu 1; tput el)" >$VERBOSE
    fi
    if [ -n "$ANSWER" ]
    then
        ARCHIVED[$CNTR]=${FILE[$ANSWER]}
    else
        read -p "Enter your backup file (compressed) tar file: " -t 30 ANSWER
+       echo "$(tput cuu 1; tput el)" >$VERBOSE
        if [ -z "$ANSWER" ] ; then return 1 ; fi
        if ${SUDO:-sudo} file -z "${ANSWER:-NoNe}" | grep -q 'POSIX tar'
        then
@@ -2341,7 +2489,7 @@ function ADD_CONTAINER(){
 	    if [ -z "${ARCHIVED[${CNTR}]}" ]       # container needs to be restored
             then
 	        MESSAGE WARNING "Check it. Is docker container '${CNTR}' with webGUI listening on port '${PRT}'?"
-	        MESSAGE WARNING "$(ss -HlpT 'sport = :${PRT}')\nFor now we just try restart the container '${CNTR}'."
+	        MESSAGE WARNING "$(ss -HlpT "sport = :${PRT}")\nFor now we just try restart the container '${CNTR}'."
                 MESSAGE WARNING "Will just restarting container '${CNTR}'."
                 ${SUDO}docker restart "${CNTR}"
 	        return 0
@@ -2591,8 +2739,11 @@ ${ITEM}"
        if ! echo ${DEAMONS} | grep -q ${ITEM}
        then
            MESSAGE INFO "Adding for OS system: '${ITEM}'${TYPE}."
-           DEAMONS+="
-${ITEM}"
+           if [ ${ITEM,,} = upgrade ] ; then DEAMONS="upgrade
+		   $DEAMONS"
+	   else DEAMONS+="
+                   ${ITEM}"
+           fi
            CHK_DEPENDANT "${ITEM}"
        fi
        RTS=
@@ -2737,6 +2888,8 @@ declare -i RTS=0
 # keep system up to date
 ADD_ITEM upgrade                                 # default check OS for updates
 
+BAR::INIT ; echo >$VERBOSE                       # set virtual window and clear display
+
 if [ -n "${DEAMONS}" ]                           # install/update first the deamons
 then
     MESSAGE INFO "Check if $USER has superuser credentials."
@@ -2745,7 +2898,7 @@ then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
     fi
-    MESSAGE NOTICE "Installing system service(s): $(echo ${DEAMONS})."
+    MESSAGE NOTICE "Installing system service(s): $(echo ${DEAMONS} | sed 's/ /, /g')."
     for ITEM in ${DEAMONS}                       # ****** system service handling
     do
        if ! ADD_SERVICE "$ITEM"
@@ -2758,6 +2911,7 @@ fi
 
 if [ -n "${CONTAINERS}" ]                        # install/update docker containers
 then
+    MESSAGE INFO "Check if $USER has docker credentials."
     if groups | grep -q -P "\sdocker" && systemctl --quiet is-active docker
     then
         SUDO=            # docker is running and docker group is added for $USER
@@ -2766,6 +2920,7 @@ then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
 	exit 1
     fi
+    MESSAGE NOTICE "Installing system service(s): $(echo ${CONTAINERS} | sed 's/ /, /g')."
     for ITEM in ${CONTAINERS}                    # ****** docker containers handling
     do
        declare -i BEFORE AFTER
