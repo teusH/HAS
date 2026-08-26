@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.21 $ $Date: 2026/08/25 19:41:18 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.27 $ $Date: 2026/08/26 15:07:34 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0                            # name of the script
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -57,6 +57,7 @@ function TTY() {                     # disable coloring and progress metering
     ([ -z "${MSG/DEBUG/}" ] || [ -z "$(tty)" ] ) && return 1
     return 0                         # if no /dev/tty (no xterm) disable as well
 }
+if ! TTY ; then TMP_LOG=/dev/null ; fi # disable logging to tty if no console
 # check if text coloring and cursor management can be used
 function XTERM() {
     if TTY 
@@ -181,10 +182,22 @@ function CLEANUP() {
   [ -n "$BARinit" ] && BAR::RESET          # should not happen
   (( ${#INSTALLED[@]} > $RTS )) && MESSAGE OK "INSTALLED and UPDATED: $((${#INSTALLED[@]} - $RTS))"
   (( $RTS > 0 )) && MESSAGE ERROR "FAILED to install or update: $RTS))"
-  if [ -f "$TMP_LOG" ] ; then echo "Installation logging saved in $TMP_LOG." >$VERBOSE ; fi
+  if [ "$TMP_LOG" != /dev/null ] && [ -s "$TMP_LOG" ]
+  then echo "Installation logging saved in $TMP_LOG." >$VERBOSE
+  fi
 }
 trap CLEANUP EXIT                          # on exit cleanup saved messages
 trap CLEANUP::failure INT TERM             # on interupt reset terminal
+
+# log functionj for system usage information
+function LOGGER() {
+    local level=${1:-info}
+    function clearESCs() {                 # remove tput coloring
+	sed -e 's/[^[:print:]]\[[0-9;]*m*//g' -e 's/[^[:print:]](B//g'
+    }
+    logger --skip-empty --priority user.${level,,} --stderr --no-act \
+	   --tag "${SCRIPT/%\.sh/}.${level,,}" "$(echo -e "$2" | clearESCs)" |& sed 's/^<[0-9]*>//' >>${TMP_LOG}  
+}
 
 # info and logging handler, be verbose of what is going on
 declare -A LEVEL                           # information level for messages
@@ -196,9 +209,6 @@ LEVEL=( [EMERG]=7 [ALERT]=6 [CRIT]=5 [ERR]=4 [WARNING]=3 [NOTICE]=2 [INFO]=1 [DE
 function MESSAGE() {
     [ -n "$2" ] || [ -n "$1" ] || return 0 # skip empty messages
     local STR=${2} L=$1
-    function clearESCs() {                 # remove tput coloring
-	sed -e 's/[^[:print:]]\[[0-9;]*m*//g' -e 's/[^[:print:]](B//g'
-    }
     if [ -z "$2" ] ; then L=ALL ; fi
     if [ -z "${LEVEL[$L]}" ]
     then                                   # state of script progress messages
@@ -253,8 +263,11 @@ function MESSAGE() {
     # show message when level is higher as quiet level
     if (( ${LEVEL[${1^^}]:-1} >= ${LEVEL[$MSG]:-4} ))   # level of publishing / versability level
     then
-       echo -e "${L}: $STR" >>${VERBOSE}
-       logger --skip-empty --priority user.${1,,} --stderr --no-act --tag "${SCRIPT/%\.sh/}.$1" "$(echo -e "$L: $STR" | clearESCs)" 2>>${TMP_LOG}  
+       if [ "${MSG^^} = "${1^^}" ]
+       then escho -e "$STR" >>${VERBOSE}
+       else echo -e "${L}: $STR" >>${VERBOSE}
+       fi
+       LOGGER ${1,,} "$STR"
     fi
     # stop if level is equal or higher as critical level
     if (( ${LEVEL[$1]:-1} >= ${LEVEL[CRIT]:-5} )) # level of critical messages
@@ -382,6 +395,7 @@ function BAR::STOP() {                     # stop progress bar
     if [ -n "$BARtiming" ]
     then
 	BARtiming=$(bc <<< "($(date +%s.%2N) - $BARtiming +1)/1.0")
+	LOGGER NOTICE "Progress timing: ${BARtiming} seconds."
     fi
     if [ -n "$1" ] && [ -n "$BARtiming" ]
     then 
@@ -393,8 +407,9 @@ function BAR::STOP() {                     # stop progress bar
 	local SUBpid
 	wait -n -p SUBpid $BARrunning       # wait on dying subshell and collect results
 	# undefined 0, 1: time<=100%, 2: time<110%, 3: time<120%, 4: time>=120%
-	RTS=$? ; (( $RTS >= 127 )) && RTS=0 # interrupted
+	RTS=$?
 	#echo "Subshell exited with value: $RTS, subshell pid: ${SUBpid:-undefined}."
+	(( $RTS >= 127 )) && RTS=0 # interrupted
 	unset BARrunning
     fi
     tput el                                # clear progress bar
@@ -409,7 +424,7 @@ function BAR::RESET(){
     tput rmcup                             # Exit alternate screen
     tput cnorm                             # Restore cursor exit 0
     unset BARinit
-    #echo "call CLEANUP from BAR::RESET" >>@@
+    #echo "call CLEANUP from BAR::RESET"
     CLEANUP
 }
 
@@ -437,17 +452,36 @@ function BAR::INIT() {
 # guess the speed of sytem. return recalculated seconds related to RPi 5 in arg2 variable
 # # algorithm: (50% connection speed, 50% RPi model speed) * (secs/package)*(nr packages).
 # To Do: ref is RPi5 B, 8Mb mem, UTP connection and SD card
+declare -i BARfactor=0
 function BAR::secs() {
-    declare -i FACTOR=100 ; local NET
-    # adjust to RPi model RPi4 (model B)
-    [ -f /proc/device-tree/model ] && ( od --strings /proc/device-tree/model | grep -q 'Pi 4') && FACTOR=350
-    # adjust to internet connectivity
-    NET=$(netstat -i | grep -P -e '^(eth|enp|wlan)' | awk '{ if( $3 > 0 ) { print $1} }')
-    if   echo "${NET}" | grep -q  -P "^(eth|enp)" ; then FACTOR+=100
-    elif echo "${NET}" | grep -q "wlan" ; then FACTOR+=200
-    else MESSAGE INFO "No internet connection: download packages delay neglected."
+    local NET ARCH
+    if (( BARfactor == 0 ))
+    then
+	BARfactor=100                       # reference RPi5, SD card and ethernet connectivity
+	
+	ARCH=$(hostnamectl | grep -m 1 'Architecture: ' | sed 's/.*: //')
+	if [ -f /sys/firmware/devicetree/base/model ]
+	then
+	    ARCH+=" $( od --strings /sys/firmware/devicetree/base/model | cut -d ' ' -f 3,4,6)"
+	else
+	    ARCH+=" desktop"
+	fi
+        # adjust to RPi model RPi4 (model B)
+        if echo "$ARCH" | grep -q 'Pi 4' ; then BARfactor=350 ; fi
+        # adjust to internet connectivity
+        NET=$(netstat -i | grep -P -e '^(eth|enp|wlan)' | awk '{ if( $3 > 0 ) { print $1} }')
+        if   echo "${NET}" | grep -q  -P "^(eth|enp)" ; then BARfactor+=100
+        elif echo "${NET}" | grep -q "wlan" ; then BARfactor+=200
+        else
+	    MESSAGE INFO "No internet connection: download packages delay neglected."
+	    printf -v "$2" "%d" $(( BARfactor*${1}/200 ))
+	    return 0
+        fi
+	# just info to recalibrate speed factor
+	LOGGER NOTICE "On $ARCH: speedfactor (200 Mb download 50%, arch 50%): $BARfactor."
     fi
-    printf -v "$2" "%d" $(( FACTOR*${1}/200 ))
+    printf -v "$2" "%d" $(( BARfactor*${1}/200 ))
+    return 0
 }
 
 # show progress if run from terminal
@@ -458,6 +492,7 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
    declare -i secs=${2:-60} freq=3
    BARtiming=$(date +%s.%2N)
    BAR::secs ${secs} secs
+   LOGGER NOTICE "Progress meter for ${1:-undefined} estimated time ${secs} seconds."
    (( secs < 4 )) && return 0                  # time too short for a progress bar
    (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
    (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710 - 5*secs)/70 ))
@@ -468,40 +503,6 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
    return 0
 }
 # #######################  END of progress BAR package
-
-# guess the speed of sytem. return recalculated seconds related to RPi 5 in arg2 variable
-# # algorithm: (50% connection speed, 50% RPi model speed) * (secs/package)*(nr packages).
-# To Do: ref is RPi5 B, 8Mb mem, UTP connection and SD card
-function BAR::secs() {
-    declare -i FACTOR=100 ; local NET
-    # adjust to RPi model RPi4 (model B)
-    [ -f /proc/device-tree/model ] && ( od --strings /proc/device-tree/model | grep -q 'Pi 4') && FACTOR=350
-    # adjust to internet connectivity
-    NET=$(netstat -i | grep -P -e '^(eth|enp|wlan)' | awk '{ if( $3 > 0 ) { print $1} }')
-    if   echo "${NET}" | grep -q  -P "^(eth|enp)" ; then FACTOR+=100
-    elif echo "${NET}" | grep -q "wlan" ; then FACTOR+=200
-    else MESSAGE INFO "No internet connection: download packages delay neglected."
-    fi
-    printf -v "$2" "%d" $(( FACTOR*${1}/200 ))
-}
-
-# show progress if run from terminal
-# arg 1: max time setting in sec, arg2 freq per second 1..9,
-# arg3/4: title, arg3: if arg3=TIMING
-# do not show when level is high
-function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIMING]
-   declare -i secs=${2:-60} freq=3
-   BARtiming=$(date +%s.%2N)
-   BAR::secs ${secs} secs
-   (( secs < 4 )) && return 0                  # time too short for a progress bar
-   (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
-   (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710 - 5*secs)/70 ))
-   BAR::INIT
-   BAR::PRINT "${1:-  }" ${secs} ${freq} &    # start USR1 signaler freq 3 per sec
-   BARrunning=$!
-   echo
-   return 0
-}
 
 # ###########################
 # filter output and log
@@ -540,30 +541,30 @@ function UPDATE_SYSTEM() {
    declare -i RTS=0 CNT=0 ; local delay
    # filter function
    function APT::filter() {
-       awk '
-        BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 }
-        /Ophalen:[0-9]/||/afhandelen van triggers/ { item = $0;
-            sub("^.*Ophalen:.*","Ophalen",item);
-            sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
-        }
-        /Ophalen:[0-9]/||/^Uitpakken/||/^Instellen/||/afhandelen van triggers/{
-        system("sleep 0.2");
-            if ( item == "" ) { item = $1; gsub(":","",item)}
-            if( item == cur ) { printf("\r%s: %d", item, ++cnt)}
-            else { cur = item; cnt = 0; printf("\n%s: %d", item, ++cnt)}
-            item = "" ; prt = 0;
-        }
-        /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
-        /^Adding boot/||/^[dD]one/ {  printf("\n"); prt = 1}
-        { if( prt ) print}
-        END { printf("timing: %d seconds\n",(systime() - timing))}
+      awk '
+         BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 }
+         /Get:[1-9]/||/Ophalen:[1-9]/||/afhandelen van triggers/{ item = $0;
+             sub("^.*Get:.*","Get",item); sub("^.*Ophalen:.*","Ophalen",item);
+             sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
+         }
+         /Get:[1-9]/||/^Unpacking/||/^Setting up/||/^Processing triggers/||/Ophalen:[1-9]/||/^Uitpakken/||/^Instellen/||/afhandelen van triggers/{
+             if ( item == "" ) { item = $1; gsub(":","",item)}
+             if( item == cur ) { printf("\r%s: %d", item, ++cnt)}
+             else { cur = item; cnt = 0; printf("\n%s: %d", item, ++cnt)}
+             item = "" ; prt = 0;
+         }
+         /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
+         /^Adding boot/||/^[dD]one/ {  printf("\n"); prt = 1}
+         { if( prt ) print}
+         END { printf("\ntiming: %d seconds\n",(systime() - timing))}
        '
    }
+   #
    # full-upgrade: basic plus hold packages incl removal
    function UPGRADE() {                      # arg1: type (upgrade or full-upgrade
        # returns 1 on failure                # arg2: nr onhold
        local type ans=no delay
-       declare -i nr=0 timing=0 onhold=0
+       declare -i nr=0  onhold=0 # timing=0
        printf -v "${2:-fake}" "0:0"          # none
        type=${1,,} ; sudo true               # sudo cache update
        case ${1,,} in
@@ -608,10 +609,10 @@ function UPDATE_SYSTEM() {
 		       SHOW OSupgrade NOTICE
 	   fi
 	   (( $? > 0 )) && rts=1             # errors
-           BAR::STOP timing
+           BAR::STOP # timing
 	   (( rts == 1 )) && ERRORS OSupgrade && return 1
-	   (( ${timing:-0} > $mysecs )) && \
-               MESSAGE INFO "Increase OS system upgrading algorithm."
+	   #(( ${timing:-0} > $mysecs )) && \
+           #    MESSAGE INFO "Increase OS system upgrading algorithm."
        fi
        local fld=4 rest=0
        fld=4 ; [ "${type}" = autoremove ] && fld=3
@@ -626,9 +627,9 @@ function UPDATE_SYSTEM() {
    if UPGRADE upgrade todo                      # upgrade basic packages
    then
        local pkgs=${todo/:*/}
-       INSTALLED[OSsystem]="OS system is upgraded. ${todo/*:/} packages are upgradeable."
        if (( ${todo/*:/} > 0 ))
        then
+           INSTALLED[OSsystem]="OS system is upgraded. ${todo/*:/} packages are upgradeable."
 	   if UPGRADE full-upgrade todo
            then
                INSTALLED[OSsystem]="OS system is fully upgraded. ${todo/*:/} packages are upgradeable."
@@ -639,7 +640,10 @@ function UPDATE_SYSTEM() {
        pkgs="${todo/:*/} of $(( $pkgs - ${todo/*:/} ))"
        if UPGRADE autoremove todo
        then
-	       INSTALLED[OSsystem]="${rts/0/Upgraded $pkgs packages. }Removed $(( ${todo/:*/} - ${todo/*:/} )) deprecated OS system packages."
+	   if echo "${rts/0/$pkgs} $(( ${todo/:*/} - ${todo/*:/} ))" | grep -q '[1-9]'
+	   then
+	       INSTALLED[OSsystem]="${Green}Installed${reset} ${rts/0/Upgraded $pkgs packages. }Removed $(( ${todo/:*/} - ${todo/*:/} )) deprecated OS packages."
+	   fi
        else
            rts=1
        fi
@@ -686,6 +690,7 @@ declare -A DOCKERS                                # array with container install
 DOCKERS[homeassistant]="Home Assistant Systsem (HAS). WebGui on port 8123"
 # container minimal disk space MB initial + operational space
 DOCKERS[homeassistant,MEM]=3200+1000
+DOCKERS[homeassistant,TIME]=455                   # measured pull seconds
 # docker container data (home) directory base
 DOCKERS[homeassistant,HOME]=${DOCKERDIR}/homeassistant
 # container image in repository docker
@@ -730,6 +735,7 @@ ${Red}Remark${Reset}: exported port e.g. 8123 can make the HAS service remote ac
 DOCKERS[zigbee2mqtt]="Zigbee to MQTT gateway service. WebGui on port 8080."
 # container minimal disk space MB initial + operational space
 DOCKERS[zigbee2mqtt,MEM]=220+100
+DOCKERS[zigbee2mqtt,TIME]=64                      # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[zigbee2mqtt,HOME]=${DOCKERDIR}/zigbee2mqtt
 DOCKERS[zigbee2mqtt,IMAGE]=ghcr.io/koenkk/zigbee2mqtt
@@ -811,6 +817,7 @@ Serial dongle Z2M configuration:
 DOCKERS[wud]="Watch's Update Docker service. WebGui on port 3000."
 # container minimal disk space MB initial + operational space
 DOCKERS[wud,MEM]=340+25
+DOCKERS[wud,TIME]=39                             # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[wud,HOME]=${DOCKERDIR}/wud
 DOCKERS[wud,IMAGE]=getwud/wud
@@ -855,6 +862,7 @@ See: https://getwud.github.io/wud/#/
 DOCKERS[go2rtc]="Video streaming service. WebGui on port 1984."
 # container minimal disk space MB initial + operational space
 DOCKERS[go2rtc,MEM]=200+2
+DOCKERS[go2rtc,TIME]=18                          # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[go2rtc,HOME]=${DOCKERDIR}/go2rtc
 DOCKERS[go2rtc,IMAGE]=alexxit/go2rtc
@@ -1052,7 +1060,7 @@ MQTT_CONF=/etc/mosquitto/conf.d/HAS.conf
 # arg1: port, optional arg2: host (dflt HOSTIP local IP number)
 function LISTENING() {                      # port is accessable?
     local H=${2:-${HOSTIP}}
-    MESSAGE INFO "Check port $1 can be accessed from remote IP ${H}.\nThis takes about 3 seconds."
+    MESSAGE NOTICE "Checking if port $1 can be accessed from remote IP ${H}. Max wait: 20 secs."
     if netcat -w 10 -z $H ${1:-12345} 2>/dev/null
     then
         return 0
@@ -1128,7 +1136,8 @@ function CREATE_USER(){
                   MESSAGE ERR "Failed to set dir ownership ${DOCKERS[$CNTR,HOME]}."
                   return 1
              fi
-             MESSAGE NOTICE "Installed user ${1/:/, group member of }.\nHome directory '${DOCKERS[$CNTR,HOME]}' for container '${CNTR}'."
+             MESSAGE NOTICE "Installed user ${1/:/, group member of }."
+	     MESSAGE NOTICE "Home directory '${DOCKERS[$CNTR,HOME]}' for container '${CNTR}'."
         fi
         if [ "${DOCKERS[${CNTR},USER]/*:/}" = dialout ]
         then
@@ -1606,12 +1615,12 @@ function INSTALL_DOCKER(){
     #${SUDO:-sudo} apt-get update -qq
     #BAR_STOP
     
-    local timing
+    #local timing
     if [ -n "$DOCKERdotCOM" ] # install using docker.com Linux install script
     then
         MESSAGE NOTICE "Install docker from get.docker.com. Can take a while..."
         # disadvantage: docker will not be updated automatically
-	BAR::START "docker core install" 45
+	BAR::START "docker core install" 90
         curl -sSL https://get.docker.com >${TMP_DIR}/install
         if [ -n "${DEBUG}" ]
         then
@@ -1626,23 +1635,24 @@ function INSTALL_DOCKER(){
                  exit 1
             fi
         fi
-	BAR::STOP timing
-	(( ${timing:-0} > 45 )) &&
-		MESSAGE INFO "Increase docker install timing to $timing."
+	BAR::STOP # timing
+	#(( ${timing:-0} > 45 )) && \
+	#    MESSAGE INFO "Increase docker install timing to $timing."
         rm -f ${TMP_DIR}/{msg,install}
     else
         MESSAGE NOTICE "Installation of docker container service apps: ${DOCKER_APPS}."
-        BAR::START "docker std install" 35
-        if ! ${SUDO:-sudo} apt install ${DOCKER_APPS} -y -q 2>&1 >${TMP_DIR}/apps
+        BAR::START "docker std install" 45
+	SHOW OSupgrade NOTICE
+        if ! ${SUDO:-sudo} apt install ${DOCKER_APPS} -y -q 2>&1 SHOE apps NOTICE
         then
              BAR::STOP
              ERRORS apps
              MESSAGE ALERT "Docker installation 'apt install ${DOCKER_APPS}' failed!"
              exit 1
         fi
-        BAR::STOP timing
-	(( ${timing:-0} > 35 )) &&
-		MESSAGE INFO "Increase docker install timing to $timing."
+        BAR::STOP # timing
+	#(( ${timing:-0} > 35 )) && \
+	#	MESSAGE INFO "Increase docker install timing to $timing."
         rm -f ${TMP_DIR}/apps
     fi
     
@@ -1658,12 +1668,12 @@ function INSTALL_DOCKER(){
     if [ -n "${DOCKER_ADDON}" ]
     then
         MESSAGE INFO "Docker add on's installation: ${DOCKER_ADDON// /, }."
-        BAR::START "install add-ons" 6
+        BAR::START "install add-ons" 7
         ${SUDO:-sudo} apt-get update -qq
-        ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq
-        BAR::STOP timing
-	(( ${timing:-0} > 7 )) &&
-		MESSAGE INFO "Increase timing install docker add-ons to $timing."
+        ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq | SHOW apps NOTICE
+        BAR::STOP # timing
+	#(( ${timing:-0} > 7 )) && \
+	#	MESSAGE INFO "Increase timing install docker add-ons to $timing."
     fi
 
     if ! [ -d "${DOCKERDIR}" ]      # check if docker containers directory exists
@@ -1687,6 +1697,7 @@ function INSTALL_DOCKER(){
 
 # install mosquitto service
 function INSTALL_MOSQUITTO() {
+    # local timing
     if LISTENING ${MQTT_PORT:-1883} REMOTE
     then
          MESSAGE WARNING "There is already an MQTT service running on port ${MQTT_PORT:-1883}. Skipping installation."
@@ -1695,30 +1706,30 @@ function INSTALL_MOSQUITTO() {
     MESSAGE INFO "Installing mosquitto service, mosquitto add on's, local config and passwd file."
     BAR::START "Install mosquitto" 7
     ${SUDO:-sudo} apt-get update -qq    # update system libraries first
-    if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 >>${TMP_DIR}/mosquitto
+    if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 | SHOW mosquitto mosquitto
     then
         BAR::STOP
         MESSAGE ERROR "Failed to install system service $SRVR."
         ERRORS mosquitto
     fi
-    BAR::STOP timing
-    (( $timing >  9 )) && \
-	    MESSAGE INFO "Increase mosquitto install timing to $timing."
+    BAR::STOP # timing
+    #(( $timing >  9 )) && \
+    #	    MESSAGE INFO "Increase mosquitto install timing to $timing."
     rm -f ${TMP_DIR}/mosquitto
 
     if ! which mosquitto_sub >/dev/null 2>/dev/null
     then
         MESSAGE INFO "Install $SRVR clients for MQTT debugging."
-        BAR::START "mosquitto clients" 6
-        if ! ${SUDO:-sudo} apt install ${SRVR}-clients -y -qq 2>&1 >>${TMP_DIR}/mosquitto
+        BAR::START "mosquitto clients" 7
+        if ! ${SUDO:-sudo} apt install ${SRVR}-clients -y -qq 2>&1 | SHOW ${SRVR}-clients mosquitto
         then
             BAR::STOP
             MESSAGE WARNING "Failed to install '${RSVR}-clients'."
             ERRORS mosquitto
         fi
-        BAR::STOP timing
-        (( $timing >  7 )) && \
-		MESSAGE INFO "Increase mosquitto add-ons timing to $timing."
+        BAR::STOP # timing
+        #(( $timing >  7 )) && \
+	#	MESSAGE INFO "Increase mosquitto add-ons timing to $timing."
     fi
     rm -f ${TMP_DIR}/mosquitto
 
@@ -1778,11 +1789,15 @@ allow_anonymous $ANONIMOUS
     if ! ${SUDO:-sudo} systemctl --quiet restart mosquitto >/dev/null
     then
          MESSAGE ALERT "Failed to restart mosquitto service.\nCheck journal and logging: e.g. run 'mosquitto -v -c /etc/mosquitto/mosquiito.conf'"
+	 LOGGER NOTICE "Failed to start mosquitto."
          return 1
     fi
     if ! mosquitto_pub --host ${HOSTIP} -t test -m OK --quiet
     then
          MESSAGE ALERT "Mosquitto service is not accepting anonymous messages.\n Check logging mosquitto."
+	 LOGGER NOTICE "Service mosquitto not responding."
+    else
+	 LOGGER NOTICE "Service mosquitto started."
     fi
     return 0
 }
@@ -1881,7 +1896,7 @@ function ADD_SERVICE(){
  
 # import (pull) Home Assistant docker container image. Arg: container name.
 function GET_IMAGE(){
-    local IMG=0 timing
+    local IMG=0 # timing
     declare -i CNT=0
     if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi  # enouph disk space?
     if ${SUDO}docker images | grep -q "${1}"
@@ -1896,6 +1911,7 @@ function GET_IMAGE(){
     for (( CNT=0; CNT < 2; CNT++ ))
     do
 	local M=$((${DOCKERS[${1},MEM]/+*/}*22/400))
+	[ -n "${DOCKERS[${1},TIME]}" ] && M=${DOCKERS[${1},TIME]}
 	BAR::START "Pull $1 image:" ${M:-30}
         if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" >${TMP_DIR}/pull
         then                  # some repros e.g. go2rtc have caching problems. Try again.
@@ -1905,9 +1921,9 @@ function GET_IMAGE(){
             ERRORS pull
 	    rm -f ${TMP_DIR}/pull
 	else
-	    BAR::STOP timing
-	    (( ${timing:-0} >  (${M:-60}*115/100)  )) && \
-		    MESSAGE INFO "Increase max timing algorithm for pull image ${1}."
+	    BAR::STOP # timing
+	    #(( ${timing:-0} >  (${M:-60}*115/100)  )) && \
+	    #    MESSAGE INFO "Increase max timing algorithm for pull image ${1}."
             break
 	fi
     done
@@ -2528,7 +2544,7 @@ DEBUG=$DEBUG       # for logging and bash interactive modus.
 if grep -q -P "^docker:.*[:,]$USER(,.*)*$" /etc/group ; then SUDO= ; else SUDO="sudo " ; fi
 if \${SUDO}docker ps --all --format 'table {{.Names}}' | grep -q ${CNTR}
 then    # if container is available, remove it
-    echo "Container ${CNTR} is already available! Container is stopped and removed." >>$VERBOSE
+    echo "Container ${CNTR} is already available! Container is stopped and removed."
     \${SUDO}docker stop ${CNTR} 2>1 >/dev/null # if running stop it
     \${SUDO}docker rm ${CNTR} 2>1 >/dev/null
 fi
@@ -2539,9 +2555,9 @@ then
     if [ -n "\$DEBUG" ]
     then
         MODUS=--detach=false
-        echo "Run container $CNTR in interactive/attached modus via via 'docker compose'." >>$VERBOSE
+        echo "Run container $CNTR in interactive/attached modus via via 'docker compose'."
     else
-        echo "Run container $CNTR in detached modus via CLI 'docker compose'." >>$VERBOSE
+        echo "Run container $CNTR in detached modus via CLI 'docker compose'."
     fi
     ${CNTR^^}_SERVER_ENABLED=true \${SUDO}docker compose -f ${DOCKERS[$CNTR,HOME]}/compose.yaml up \$MODUS
 else
@@ -2550,9 +2566,9 @@ else
     if [ -n "\$DEBUG" ]
     then
         MODUS="--interactive --tty"
-        echo "Run container $CNTR in interactive/attached \$DEBUG modus via CLI 'docker run'." >>$VERBOSE
+        echo "Run container $CNTR in interactive/attached \$DEBUG modus via CLI 'docker run'."
     else
-        echo "Running container $CNTR in detached modus via CLI 'docker run'." >>$VERBOSE
+        echo "Running container $CNTR in detached modus via CLI 'docker run'."
     fi
     \${SUDO} docker run \$MODUS \\
 EOF
@@ -2620,9 +2636,11 @@ EOF
     MESSAGE NOTICE "Container runs with effective user: ${PRT:-${Blue}anonymous${Reset}}."
     if (( $STATUS == 0 ))
     then
-	    INSTALLED[${CNTR}]="${Green}Installed${Reset} container ${Black}$CNTR${Reset}, effective user ${Italic}${PRT:-anonymous}${Reset}, port(s): ${Italic}${PRTS:-None}${Reset}."
+	INSTALLED[${CNTR}]="${Green}Installed${Reset} container ${Black}$CNTR${Reset}, effective user ${Italic}${PRT:-anonymous}${Reset}, port(s): ${Italic}${PRTS:-None}${Reset}."
+	LOGGER NOTICE "Docker container '${CNTR}' successfully installed and  started."
     else
 	INSTALLED[${CNTR}]="${Red}Failed${Reset} to install container ${Italic}$CNTR${Reset}."
+	LOGGER ERR "Failed to install and run docker container '${CNTR}'."
     fi
     return $STATUS
 }
@@ -2784,7 +2802,7 @@ do                                              # handle options
         shift
 	#BAR::START "Help info" 60
 	if TTY ; then HELP $@ | more ; else HELP $@ ; fi
-	#BAR::STOP timing
+	#BAR::STOP # timing
 	#MESSAGE STATE "Help timing: $timing seconds"
         exit 0
     elif [ "${1/#-*[dD][eE][uU]*/debug}" = "debug" ]
@@ -2805,6 +2823,7 @@ do                                              # handle options
         break
     fi
 done
+echo -e "Bash script ${SCRIPT} is using log level: ${Blue}${MSG^^}${Reset}." >${VERBOSE}
 
 # collect list of containers and services to manipulate
 
@@ -2933,6 +2952,7 @@ then
        else
            CHECK_FREESPACE "${ITEM}" AFTER
            MESSAGE DEBUG "Diskspace container ${ITEM} ($((${DOCKERS[${ITEM},MEM]})) Mb). Installation took $(( $BEFORE - $AFTER )) Mb diskspace."
+	   LOGGER NOTICE "Container install used $(( $BEFORE - $AFTER )) Mb diskspace."
            unset BEFORE AFTER
        fi
     done
