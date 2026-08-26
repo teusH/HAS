@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.27 $ $Date: 2026/08/26 15:07:34 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.28 $ $Date: 2026/08/26 15:41:21 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0                            # name of the script
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -263,8 +263,8 @@ function MESSAGE() {
     # show message when level is higher as quiet level
     if (( ${LEVEL[${1^^}]:-1} >= ${LEVEL[$MSG]:-4} ))   # level of publishing / versability level
     then
-       if [ "${MSG^^} = "${1^^}" ]
-       then escho -e "$STR" >>${VERBOSE}
+       if [ "${MSG^^}" = "${1^^}" ]
+       then echo -e "$STR" >>${VERBOSE}
        else echo -e "${L}: $STR" >>${VERBOSE}
        fi
        LOGGER ${1,,} "$STR"
@@ -452,12 +452,13 @@ function BAR::INIT() {
 # guess the speed of sytem. return recalculated seconds related to RPi 5 in arg2 variable
 # # algorithm: (50% connection speed, 50% RPi model speed) * (secs/package)*(nr packages).
 # To Do: ref is RPi5 B, 8Mb mem, UTP connection and SD card
+# To Do: SDcard or SSD mem speed may show an improvement of 20% - 40%!
 declare -i BARfactor=0
 function BAR::secs() {
     local NET ARCH
     if (( BARfactor == 0 ))
     then
-	BARfactor=100                       # reference RPi5, SD card and ethernet connectivity
+	BARfactor=100                       # reference RPi5, usual SD card and 1G ethernet 
 	
 	ARCH=$(hostnamectl | grep -m 1 'Architecture: ' | sed 's/.*: //')
 	if [ -f /sys/firmware/devicetree/base/model ]
@@ -690,7 +691,7 @@ declare -A DOCKERS                                # array with container install
 DOCKERS[homeassistant]="Home Assistant Systsem (HAS). WebGui on port 8123"
 # container minimal disk space MB initial + operational space
 DOCKERS[homeassistant,MEM]=3200+1000
-DOCKERS[homeassistant,TIME]=455                   # measured pull seconds
+DOCKERS[homeassistant,TIME]=510                   # measured pull seconds
 # docker container data (home) directory base
 DOCKERS[homeassistant,HOME]=${DOCKERDIR}/homeassistant
 # container image in repository docker
@@ -735,7 +736,7 @@ ${Red}Remark${Reset}: exported port e.g. 8123 can make the HAS service remote ac
 DOCKERS[zigbee2mqtt]="Zigbee to MQTT gateway service. WebGui on port 8080."
 # container minimal disk space MB initial + operational space
 DOCKERS[zigbee2mqtt,MEM]=220+100
-DOCKERS[zigbee2mqtt,TIME]=64                      # measured pull time seconds
+DOCKERS[zigbee2mqtt,TIME]=68                      # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[zigbee2mqtt,HOME]=${DOCKERDIR}/zigbee2mqtt
 DOCKERS[zigbee2mqtt,IMAGE]=ghcr.io/koenkk/zigbee2mqtt
@@ -817,7 +818,7 @@ Serial dongle Z2M configuration:
 DOCKERS[wud]="Watch's Update Docker service. WebGui on port 3000."
 # container minimal disk space MB initial + operational space
 DOCKERS[wud,MEM]=340+25
-DOCKERS[wud,TIME]=39                             # measured pull time seconds
+DOCKERS[wud,TIME]=50                             # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[wud,HOME]=${DOCKERDIR}/wud
 DOCKERS[wud,IMAGE]=getwud/wud
@@ -862,7 +863,7 @@ See: https://getwud.github.io/wud/#/
 DOCKERS[go2rtc]="Video streaming service. WebGui on port 1984."
 # container minimal disk space MB initial + operational space
 DOCKERS[go2rtc,MEM]=200+2
-DOCKERS[go2rtc,TIME]=18                          # measured pull time seconds
+DOCKERS[go2rtc,TIME]=25                          # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[go2rtc,HOME]=${DOCKERDIR}/go2rtc
 DOCKERS[go2rtc,IMAGE]=alexxit/go2rtc
@@ -1620,7 +1621,7 @@ function INSTALL_DOCKER(){
     then
         MESSAGE NOTICE "Install docker from get.docker.com. Can take a while..."
         # disadvantage: docker will not be updated automatically
-	BAR::START "docker core install" 90
+	BAR::START "docker core install" 130
         curl -sSL https://get.docker.com >${TMP_DIR}/install
         if [ -n "${DEBUG}" ]
         then
@@ -1704,7 +1705,7 @@ function INSTALL_MOSQUITTO() {
          return 1
     fi 
     MESSAGE INFO "Installing mosquitto service, mosquitto add on's, local config and passwd file."
-    BAR::START "Install mosquitto" 7
+    BAR::START "Install mosquitto" 25
     ${SUDO:-sudo} apt-get update -qq    # update system libraries first
     if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 | SHOW mosquitto mosquitto
     then
@@ -1720,7 +1721,7 @@ function INSTALL_MOSQUITTO() {
     if ! which mosquitto_sub >/dev/null 2>/dev/null
     then
         MESSAGE INFO "Install $SRVR clients for MQTT debugging."
-        BAR::START "mosquitto clients" 7
+        BAR::START "mosquitto clients" 14
         if ! ${SUDO:-sudo} apt install ${SRVR}-clients -y -qq 2>&1 | SHOW ${SRVR}-clients mosquitto
         then
             BAR::STOP
