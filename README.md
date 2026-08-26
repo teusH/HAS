@@ -5,18 +5,21 @@ Home Assistant toolset, e.g. script to install  HAS with companion docker contai
 Bash script to install docker containers family on RPi (work in progress): Home Assistant, Zigbee2MQTT, Mosquitto, WUD, Porttainer, etc.
 
 ### How to use this command:
-*containers-install.sh [--level=LEVEL|--debug|help|default|install|purge|container|service ...]*
+*containers-install.sh [--level=LEVEL|--debug|help|default|install|purge|container|upgrade/service ...]*
       
 Optional arguments:  
  *--level=LEVEL* or *-l=LEVEL*: level of verbosity, default level: ALL<br/>
     Levels of verbosity (prioritized): ERROR, INFO, ALL, EMERGE, QUIET, CRITICAL, ALERT, WARN, NOTICE, DEBUG.<br/>
+    
  *--debug*: Script will show statements executed. Or use CLI environment variable DEBUG=on.<br/>
     In debug mode the script will install containers with tty and attached.<br/>
     Tip: Terminal access to running container: *docker debug container_name*,<br/>
+    
  *help* gives this information as shown here.<br/>
     *help name1 ...* shows container docker *docker run --detach ...*
 
  *install* installs or updates a docker container/image or system service (docker, mosquitto).<br/>
+ 
  *update* update and restarts a docker container.<br/>
   Install or update may be followed with container name(s). Default: default set of containers.<br/>
     *container* is either a container name (prefer lowercase) or defaults (all default containers).<br/>
@@ -25,9 +28,12 @@ Optional arguments:
   Use enivironment variable *DEBUG=log* to run The script 'setup.sh' in attach mode.<br/>
   On successful install an experimental compose.yaml file is generated in the container home directory.
     
- *service* either mosquitto or docker will do a system service installation.
+ *service* either upgrade, mosquitto or docker will do a system service (full) upgrade or installation.
 
 ### Command arguments configuration examples:
+*containers-install.sh help homeassistant*</br>
+  Shows installation information for the docker container homeassistant.
+  
 *containers-install.sh default*<br/>
   Runs with default container/image and service set.
   Default containers or services are: mosquitto, homeassistant, wud, go2rtc.
@@ -54,16 +60,6 @@ Optional arguments:
 If setup.sh is available or command option *help container* from script looks ok,
 one can rm with docker CLI the container and use docker run or compose to start container.<br/>
 
-Some operations need super user 'root' permission (using --privileged as option).
-If super user password is needed the script will ask via 'sudo' for the 'root' password.
-Once the pasword is entered the script will reuse the provide root permission via 'sudo'.
-
-The script will install automatically dependent system service(s) or containers when needed so.<br/>
-If a docker image is already installed and running,
-the script will try to  update the image and restart the container or service.<br/>
-Note that if the docker container WUD is installed,
-one does not need to run this script for image version updates.
-
 **Advise**:<br/>
 Before installing a docker container one is advised to obtain some preparation information.
 E.g. use the command 'containers-install.sh help container_name'.<br/>
@@ -74,11 +70,6 @@ Portainer is however more complex to manage.
 
 The script will use preconfigured installation. See DOCKER array variable definitions to change them if needed.<br/>
 Docker container may use a serial dongle device. The group needed to access it is automatically discovered and added as group membership for the container. E.g. dialout. A reboot maybe required to activate user and group id mapping in hte OS kernel.
-
-### TO DO:
-- identify and use an available and running MQTT service on local network.
-- if container is already installed use the container configuration.
-- the docker container run argumentes could be converted to compose a yaml file.
 
 ### Available and configured debian installable services:
 
