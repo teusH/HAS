@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.28 $ $Date: 2026/08/26 15:41:21 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 3.29 $ $Date: 2026/08/26 21:02:55 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0                            # name of the script
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -506,11 +506,31 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
 # #######################  END of progress BAR package
 
 # ###########################
+# filter function
+function APT::filter() {
+   awk '
+      BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 }
+      /Get:[1-9]/||/Ophalen:[1-9]/||/afhandelen van triggers/{ item = $0;
+          sub("^.*Get:.*","Get",item); sub("^.*Ophalen:.*","Ophalen",item);
+          sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
+      }
+      /Get:[1-9]/||/^Unpacking/||/^Setting up/||/^Processing triggers/||/Ophalen:[1-9]/||/^Uitpakken/||/^Instellen/||/afhandelen van triggers/{
+          if ( item == "" ) { item = $1; gsub(":","",item)}
+          if( item == cur ) { printf("\r%s: %d", item, ++cnt)}
+          else { cur = item; cnt = 0; printf("\n%s: %d", item, ++cnt)}
+          item = "" ; prt = 0;
+      }
+      /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
+      /^Adding boot/||/^[dD]one/ {  printf("\n"); prt = 1}
+      { if( prt ) print}
+      END { printf("\ntiming: %d seconds\n",(systime() - timing))}
+    '
+}
+
 # filter output and log
 function SHOW() {
     # function [ArchiveFileName priority filter channel, dflts: /dev/null 
     local log=${1:-/dev/null} priority=${2:-ERR} filter=cat channel=$VERBOSE
-    shift ; shift
     while  [ -n "$1" ]
     do
        case "$1" in
@@ -540,26 +560,6 @@ function SHOW() {
 # check if system needs to be updated. Update if last update was older as a week ago
 function UPDATE_SYSTEM() {
    declare -i RTS=0 CNT=0 ; local delay
-   # filter function
-   function APT::filter() {
-      awk '
-         BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 }
-         /Get:[1-9]/||/Ophalen:[1-9]/||/afhandelen van triggers/{ item = $0;
-             sub("^.*Get:.*","Get",item); sub("^.*Ophalen:.*","Ophalen",item);
-             sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
-         }
-         /Get:[1-9]/||/^Unpacking/||/^Setting up/||/^Processing triggers/||/Ophalen:[1-9]/||/^Uitpakken/||/^Instellen/||/afhandelen van triggers/{
-             if ( item == "" ) { item = $1; gsub(":","",item)}
-             if( item == cur ) { printf("\r%s: %d", item, ++cnt)}
-             else { cur = item; cnt = 0; printf("\n%s: %d", item, ++cnt)}
-             item = "" ; prt = 0;
-         }
-         /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
-         /^Adding boot/||/^[dD]one/ {  printf("\n"); prt = 1}
-         { if( prt ) print}
-         END { printf("\ntiming: %d seconds\n",(systime() - timing))}
-       '
-   }
    #
    # full-upgrade: basic plus hold packages incl removal
    function UPGRADE() {                      # arg1: type (upgrade or full-upgrade
@@ -604,10 +604,10 @@ function UPDATE_SYSTEM() {
 	   if [ -z "${type/*upgrade*/}" ]
            then
                ${SUDO:-sudo} apt-get --yes --quiet ${type,,} 2>/dev/null | \
-		       SHOW OSupgrade NOTICE filter="APT::filter"
+		       SHOW log=OSupgrade priority=NOTICE filter="APT::filter"
 	   else
 	       ${SUDO:-sudo} apt autoremove --quiet 2>/dev/null | \
-		       SHOW OSupgrade NOTICE
+		       SHOW log=OSupgrade priority=NOTICE
 	   fi
 	   (( $? > 0 )) && rts=1             # errors
            BAR::STOP # timing
@@ -622,6 +622,12 @@ function UPDATE_SYSTEM() {
        return 0
    }
 
+   # check if there are upgradeable packages
+   if ${SUDO:-sudo} apt-get update 2>/dev/null | tail -1 | grep -q '^[1-9]'
+   then
+       MESSAGE INFO "OS system is up to date."
+       return 0
+   fi
    MESSAGE STATE "Upgrading OS system packages"
    # try a basic OS packages update
    local todo rts=0
@@ -862,7 +868,7 @@ See: https://getwud.github.io/wud/#/
 # See: https://github.com/AlexxIT/go2rtc
 DOCKERS[go2rtc]="Video streaming service. WebGui on port 1984."
 # container minimal disk space MB initial + operational space
-DOCKERS[go2rtc,MEM]=200+2
+DOCKERS[go2rtc,MEM]=260+2
 DOCKERS[go2rtc,TIME]=25                          # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[go2rtc,HOME]=${DOCKERDIR}/go2rtc
@@ -1643,8 +1649,7 @@ function INSTALL_DOCKER(){
     else
         MESSAGE NOTICE "Installation of docker container service apps: ${DOCKER_APPS}."
         BAR::START "docker std install" 45
-	SHOW OSupgrade NOTICE
-        if ! ${SUDO:-sudo} apt install ${DOCKER_APPS} -y -q 2>&1 SHOE apps NOTICE
+        if ! ${SUDO:-sudo} apt install ${DOCKER_APPS} -y -q 2>&1 |  SHOW log=apps priority=NOTICE
         then
              BAR::STOP
              ERRORS apps
@@ -1671,7 +1676,7 @@ function INSTALL_DOCKER(){
         MESSAGE INFO "Docker add on's installation: ${DOCKER_ADDON// /, }."
         BAR::START "install add-ons" 7
         ${SUDO:-sudo} apt-get update -qq
-        ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq | SHOW apps NOTICE
+        ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq | SHOW log=apps priority=NOTICE
         BAR::STOP # timing
 	#(( ${timing:-0} > 7 )) && \
 	#	MESSAGE INFO "Increase timing install docker add-ons to $timing."
@@ -1707,7 +1712,7 @@ function INSTALL_MOSQUITTO() {
     MESSAGE INFO "Installing mosquitto service, mosquitto add on's, local config and passwd file."
     BAR::START "Install mosquitto" 25
     ${SUDO:-sudo} apt-get update -qq    # update system libraries first
-    if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 | SHOW mosquitto mosquitto
+    if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 | SHOW log=mosquitto priority=NOTICE
     then
         BAR::STOP
         MESSAGE ERROR "Failed to install system service $SRVR."
@@ -1722,7 +1727,7 @@ function INSTALL_MOSQUITTO() {
     then
         MESSAGE INFO "Install $SRVR clients for MQTT debugging."
         BAR::START "mosquitto clients" 14
-        if ! ${SUDO:-sudo} apt install ${SRVR}-clients -y -qq 2>&1 | SHOW ${SRVR}-clients mosquitto
+        if ! ${SUDO:-sudo} apt install ${SRVR}-clients -y -qq 2>&1 | SHOW log=${SRVR}-clients priority=NOTICE
         then
             BAR::STOP
             MESSAGE WARNING "Failed to install '${RSVR}-clients'."
@@ -2263,7 +2268,7 @@ advanced:
 		     (echo "#----"; cat ${TMP_DIR}/update-conf.yaml; echo "#----") >${VERBOSE}
 	     fi
 	 else
-             ${SUDO:-sudo} mv ${TMP_DIR}/update-conf.yaml ${CONF}
+             ${SUDO:-sudo} mv --force ${TMP_DIR}/update-conf.yaml ${CONF}
              if [ -n "${DOCKERS[zigbee2mqtt,USER]/:*/}" ]
              then
                  ${SUDO:-sudo} chown ${DOCKERS[zigbee2mqtt,USER]/:*/}:${DOCKERS[zigbee2mqtt,USER]/:*/} ${CONF}
@@ -2609,7 +2614,7 @@ EOF
 	    fi
         done
 	chmod +x ${TMP_DIR}/run_command
-	${SUDO:-sudo} mv -i ${TMP_DIR}/run_command ${DOCKERS[$CNTR,HOME]}/setup.sh
+	${SUDO:-sudo} mv --force ${TMP_DIR}/run_command ${DOCKERS[$CNTR,HOME]}/setup.sh
 	${SUDO:-sudo} chown root:docker ${DOCKERS[$CNTR,HOME]}/setup.sh
         MESSAGE DEBUG "Run container '${CNTR}' CLI command: ${DOCKERS[$CNTR,HOME]}/setup.sh"
     fi
@@ -2623,7 +2628,7 @@ EOF
 		-e "/host_ip:/s/invalid IP/0.0.0.0/" \
 		-e "/${CNTR}:/s//&\\n    container_name: ${CNTR}/" \
 		${TMP_DIR}/compose.yaml
-	${SUDO:-sudo} mv ${TMP_DIR}/compose.yaml ${DOCKERS[$CNTR,HOME]}/compose.yaml
+	${SUDO:-sudo} mv --force ${TMP_DIR}/compose.yaml ${DOCKERS[$CNTR,HOME]}/compose.yaml
 	${SUDO:-sudo} chown root:docker ${DOCKERS[$CNTR,HOME]}/compose.yaml
 	MESSAGE NOTICE "Created docker (experimental) compose file: DOCKERS[$CNTR,HOME]/compose.yaml"
     fi
