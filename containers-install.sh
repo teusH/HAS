@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 3.29 $ $Date: 2026/08/26 21:02:55 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 4.1 $ $Date: 2026/08/27 12:57:07 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0                            # name of the script
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -148,8 +148,7 @@ fi
 # Define info function on exit
 function CLEANUP::success() {
   rm -rf ${TMP_DIR}                   # clean up log files
-  [ -n "${Reset}" ] && (( ${#INSTALLED[@]} > 0 )) && \
-  return 0
+  [ -n "${Reset}" ] && (( ${#INSTALLED[@]} > 0 )) && return 0
 }
 
 function CLEANUP::failure() {         # show error files
@@ -163,7 +162,7 @@ function CLEANUP::failure() {         # show error files
           rm -rf "$F"
       fi
   done
-  return 0
+  return 1
 }
 
 # cleanup logging and show saved error log files
@@ -288,7 +287,7 @@ function ERRORS() {
     fi
     [ ! -s ${TMP_DIR}/"$F" ] && return 0
     rm -f ${TMP_DIR}/"$F"
-    read -p "${Red}ERRORS${Reset} Hit just ${Blue}${Under}hit enter key to continue${Reset}." -s -t 30 ANONIMOUS || \
+    read -p "${Red}ERRORS${Reset} Hit just ${Blue}${Under}hit enter key to try again${Reset}." -s -t 10 ANONIMOUS || \
 	    MESSAGE EMERG "DISCONTINUED. Exiting."
     echo -e "$(tput cuu 1; tput el)" >$VERBOSE
     return 0
@@ -545,10 +544,10 @@ function SHOW() {
        esac
        shift
     done
-    if ! type -t ${filter} 2>/dev/null ; then filter=cat ; fi    # make sure filter function exists
+    if ! type -t ${filter} 2>&1 >/dev/null ; then filter=cat ; fi # make sure filter function exists
     # priority level -> priority
     if [ -z "${LEVEL[${priority:-undef}]}" ] ; then  channel=/dev/null ; filter=cat ; output=/dev/null
-    elif (( ${LEVEL[${priority}]:-10} < ${LEVEL[${MSG^^}]:-4} ))   # level of publishing / versability level
+    elif (( ${LEVEL[${priority}]:-10} < ${LEVEL[${MSG^^}]:-4} ))   # publishing / versability level
     then channel=$VERBOSE
     else display=/dev/null ; filter=cat
     fi
@@ -1914,7 +1913,7 @@ function GET_IMAGE(){
     # check if there is an update.
     # Return 0 on success, return 1 if image is already existant.
     # Return 2 if image was up to date. Return 4 on failure. Return 3 on image inspect error.
-    for (( CNT=0; CNT < 2; CNT++ ))
+    for (( CNT=0; CNT <= 2; CNT++ ))
     do
 	local M=$((${DOCKERS[${1},MEM]/+*/}*22/400))
 	[ -n "${DOCKERS[${1},TIME]}" ] && M=${DOCKERS[${1},TIME]}
@@ -1922,9 +1921,9 @@ function GET_IMAGE(){
         if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" >${TMP_DIR}/pull
         then                  # some repros e.g. go2rtc have caching problems. Try again.
             BAR::STOP
-	    MESSAGE WARNING "Failed to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again."
-	    sleep 15
+	    MESSAGE WARNING "Failure $((CNT+1)) to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again?"
             ERRORS pull
+	    #sleep 15
 	    rm -f ${TMP_DIR}/pull
 	else
 	    BAR::STOP # timing
