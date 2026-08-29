@@ -101,4 +101,10 @@ Available and configured docker containers:
   
 Manage docker containers via CLI command: *docker [ps|restart|stop|status] dockerContainerName*.<br/>
 Or use (remote) *portainer* or *wud*.
+### Security
+The script only uses sudo when needed. 
+
+Hint: after downloading the script take a look at the bash source. In particular look at the SUDO statemanets.
+
+Then try 'bash containers-install.sh help' to test the bash version.
 
