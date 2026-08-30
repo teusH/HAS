@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 4.6 $ $Date: 2026/08/29 18:21:37 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 4.7 $ $Date: 2026/08/30 14:38:18 $' | awk '{ printf("V%s_%s", $2,$5);}')
 SCRIPT=$0                            # name of the script
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -42,6 +42,7 @@ function HOSTIP() {
    return 0
 }
 HOSTIP
+CURSOR=1:1
 
 
 # define default logging level
@@ -71,16 +72,10 @@ function XTERM() {
 }
 CURSOR_POS() {                       # get current cursor position line;col
   local pos
-  [ -z "$Reset" ] && return 1
-  echo -en "\E[6n" ; read -sdR pos
-  if [ -z "$1" ]
-  then echo ${pos#*[}
-  else printf -v "$1" "%s" ${pos#*[} ; fi
-  return 0
-
-  #IFS='[;' read -p $'\e[6n' -d R -a pos -rs || echo "failed with error: $? ; ${pos[*]}"
-  #printf -v "$1"  "${pos[1]}:${pos[2]}"
+  IFS='[;' read -p $'\e[6n' -d R -a pos -rs || echo "failed with error: $? ; ${pos[*]}"
+  printf -v "$1"  "${pos[1]}:${pos[2]}"
 }
+CURSOR_POS CURSOR
 
 # Default list of containers is CONTAINERS
 DEFAULTS="mosquitto zigbee2mqtt homeassistant wud go2rtc"
@@ -185,11 +180,18 @@ function CLEANUP() {
   (( ${#INSTALLED[@]} > $RTS )) && MESSAGE OK "INSTALLED and UPDATED: $(( ${#INSTALLED[@]}-${RTS} ))"
   (( $RTS > 0 )) && MESSAGE ERROR "FAILED to install or update: $RTS))"
   if [ "$TMP_LOG" != /dev/null ] && [ -s "$TMP_LOG" ]
-  then echo-e  "\n\nInstallation logging saved in ${Blue}$TMP_LOG${Reset}." >$VERBOSE
+  then echo -e  "\n\nInstallation logging saved in ${Blue}$TMP_LOG${Reset}." >$VERBOSE
   fi
+  tput cup ${CURSOR/:*/} 0 ; tput cud1 ; tput ed
 }
+# interrupt processing the script
+function INTERRUPTED() {
+    CURSOR_POS CURSOR
+    BAR::RESET
+}
+
 trap CLEANUP EXIT                          # on exit cleanup saved messages
-trap CLEANUP::failure INT TERM             # on interupt reset terminal
+trap INTERRUPTED INT TERM                  # on interupt reset terminal
 
 # log functionj for system usage information
 function LOGGER() {
@@ -274,6 +276,7 @@ function MESSAGE() {
     # stop if level is equal or higher as critical level
     if (( ${LEVEL[$1]:-1} >= ${LEVEL[CRIT]:-5} )) # level of critical messages
     then
+       CURSOR_POS CURSOR                          # save cursor position for restore
        MESSAGE ERR "EXITING ON ERRORS"
        exit 1
     fi
@@ -283,7 +286,7 @@ function MESSAGE() {
 function ERRORS() {
     local F=${1//*\//}
     if [ -z "$F" ] ; then return 0 ; fi
-    ( ! TTY ) && MESSAGE EMERG "DISCONTINUED. Exiting." && exit 1
+    ( ! TTY ) && MESSAGE EMERG "DISCONTINUED. Exiting." # && exit 1
     if [ "$F" != errors ] && [ -s ${TMP_DIR}/"$F" ]
     then
         cat ${TMP_DIR}/"$F" >> ${TMP_DIR}/errors
@@ -619,17 +622,17 @@ function UPDATE_SYSTEM() {
 	   case "${type}" in
 	       full-upgrade)
 	       BAR::START "OS ${type^^}:" ${mysecs}
-               ${SUDO:-sudo} apt-get --yes --quiet ${type,,} 2>/dev/null | \
+               ${SUDO:-sudo} stdbuf -oL apt-get --yes --quiet ${type,,} 2>/dev/null | \
 		   SHOW log=OSupgrade priority=NOTICE filter="APT::filter"
 	       ;;
 	       upgrade)
 	       BAR::START "OS ${type^^}:" ${mysecs}
-               ${SUDO:-sudo} apt-get --yes --quiet ${type,,} 2>/dev/null | \
+               ${SUDO:-sudo} stdbuf -o L apt-get --yes --quiet ${type,,} 2>/dev/null | \
 	           SHOW log=OSupgrade priority=NOTICE filter="APT::filter"
 	       ;;
 	       autoremove)
 	       BAR::START "OS ${type^^}:" ${mysecs}
-               ${SUDO:-sudo} apt autoremove --quiet 2>/dev/null | \
+               stdbuf -oL ${SUDO:-sudo} apt autoremove --quiet 2>/dev/null | \
 		   SHOW log=OSupgrade priority=NOTICE
 	       ;;
            esac
@@ -1662,11 +1665,11 @@ function INSTALL_DOCKER(){
             MESSAGE DEBUG "Dry run docker installation:"
             ${SUDO:-sudo} bash ${TMP_DIR}/install --dry-run
         else
-            if ! ${SUDO:-sudo} bash ${TMP_DIR}/install 2>&1 | tee -a $TMP_DIR/msg | grep -v '^+ sh -c'
+            if ! ${SUDO:-sudo} stdbuf -o L bash ${TMP_DIR}/install 2>&1 | tee -a $TMP_DIR/msg | grep -v '^+ sh -c'
             then
                  ERRORS msg    # save errors messages
-                 MESSAGE ALERT "Docker installation failed.\nSee logging ${TMP_DIR}."
 		 BAR::STOP
+                 MESSAGE ALERT "Docker installation failed.\nSee logging ${TMP_DIR}."
                  exit 1
             fi
         fi
@@ -1675,7 +1678,8 @@ function INSTALL_DOCKER(){
     else
         MESSAGE NOTICE "Installation of docker container service apps: ${DOCKER_APPS}."
         BAR::START "docker std install" 45
-        if ! ${SUDO:-sudo} apt install ${DOCKER_APPS} -y -q 2>/dev/null |  SHOW log=apps priority=NOTICE
+        if ! stdbuf -o L ${SUDO:-sudo} apt install ${DOCKER_APPS} -y -q 2>/dev/null | \
+	       SHOW log=apps priority=NOTICE
         then
              BAR::STOP
              ERRORS apps
@@ -1689,9 +1693,7 @@ function INSTALL_DOCKER(){
     # Create hello world container to test :) 
     MESSAGE DEBUG "Check docker is running OK"
     if ! ${SUDO}docker run hello-world 2>&1 | grep -q  'Hello from Docker'
-    then
-        MESSAGE EMERG "Docker service failed to install."
-        exit 1
+    then MESSAGE EMERG "Docker service failed to install." #exit 1
     fi
 
     # install docker add on applications and/or libraries
@@ -1699,8 +1701,9 @@ function INSTALL_DOCKER(){
     then
         MESSAGE INFO "Docker add on's installation: ${DOCKER_ADDON// /, }."
         BAR::START "install add-ons" 5
-        ${SUDO:-sudo} apt-get update -qq
-        ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq | SHOW log=apps priority=NOTICE
+        # ${SUDO:-sudo} apt-get update -qq
+        stdbuf -o L ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq | \
+		SHOW log=apps priority=NOTICE
         BAR::STOP # timing
     fi
 
@@ -1733,7 +1736,8 @@ function INSTALL_MOSQUITTO() {
     MESSAGE INFO "Installing mosquitto service, mosquitto add on's, local config and passwd file."
     BAR::START "Install mosquitto" 11
     ${SUDO:-sudo} apt-get update -qq           # update system libraries first
-    if ! ${SUDO:-sudo} apt-get install mosquitto -y -qq 2>&1 | SHOW log=mosquitto priority=NOTICE
+    if ! ${SUDO:-sudo} stdbuf -oL apt-get install mosquitto -y -qq 2>&1 | \
+	    SHOW log=mosquitto priority=NOTICE filter="APT::filter"
     then
         BAR::STOP
         MESSAGE ERROR "Failed to install system service $SRVR."
@@ -1746,7 +1750,8 @@ function INSTALL_MOSQUITTO() {
     then
         MESSAGE INFO "Install $SRVR clients for MQTT debugging."
         BAR::START "mosquitto clients" 4
-        if ! ${SUDO:-sudo} apt install ${SRVR}-clients -y -qq 2>/dev/null | SHOW log=${SRVR}-clients priority=NOTICE
+        if ! ${SUDO:-sudo} stdbuf -o L apt install ${SRVR}-clients -y -qq 2>/dev/null | \
+		SHOW log=${SRVR}-clients priority=NOTICE filter="APT::filter"
         then
             BAR::STOP
             MESSAGE WARNING "Failed to install '${RSVR}-clients'."
@@ -1876,14 +1881,19 @@ function ADD_SERVICE(){
     STATUS=$?
     case ${STATUS} in
     0)
-          MESSAGE DEBUG "System service '${SRVR}' is already installed and running."
+          MESSAGE INFO "System service '${SRVR}' is already installed and running."
+	  LOGGER OK "System service '${SRVR}' is servicing"
           return 0
     ;;
     1)    MESSAGE CRIT "Service '$SRVR' deamon is not running. Restart manually."
     ;;
     2|3)  MESSAGE NOTICE "Service '$SRVR' deamon is installed but not running. Restarting service."
 	  ${SUDO:-sudo} systemctl  restart ${SRVR} ; sleep 2
-	  if systemctl --quiet is-active ${SRVR} ; then return 0 ; fi 
+	  if systemctl --quiet is-active ${SRVR}
+	  then
+	      LOGGER OK "System service '${SRVR}' is servicing"
+	      return 0
+	  fi 
     ;;
     *)    MESSAGE INFO "Installing and starting $SRVR deamon."
     ;;
@@ -1918,11 +1928,8 @@ function ADD_SERVICE(){
 # import (pull) Home Assistant docker container image. Arg: container name.
 function GET_IMAGE(){
     local IMG=0
-    declare -i CNT=0
+    declare -i CNT=0 RTS=0
     if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi  # enouph disk space?
-    if ${SUDO}docker images | grep -q "${1}"
-    then  IMG=1                                       # some image is already imported
-    fi
     MESSAGE INFO "Check and get latest container '${1}' image '${DOCKERS[${1},IMAGE]}'.\nThis takes some while..."
     # some container repros fail first time, but are succefull second trial. E.g. go2rtc pull image.
     # check if there is an update.
@@ -1945,26 +1952,28 @@ function GET_IMAGE(){
             break
 	fi
     done
-    if ! [ -f ${TMP_DIR}/pull ]
+    (( CNT == 3 )) && return 3
+    if ! [ -s ${TMP_DIR}/pull ]
     then
         MESSAGE WARNING "Failed to pull image ${DOCKERS[${1},IMAGE]}. Unknown image?"
-        return 4
+	LOGGER ERR "Failed to pull image ${DOCKERS[${1},IMAGE]}"
+        return 3
     fi
     if grep -q 'up to date' ${TMP_DIR}/pull
     then
-        rm -f ${TMP_DIR}/pull
         if ${SUDO}docker ps --format '{{.Names}}' | grep -q '${1}'  # is container running?
         then
-            return 2        # still running fine
+            LOGGER NOTICE "Container image for '${1}' is up to date"
+            RTS=1        # still running fine
+	else RTS=2       # up to date, but not running
         fi
-    else
-        rm -f ${TMP_DIR}/pull
     fi
+    rm -f ${TMP_DIR}/pull
     # check if image is uploaded and installed as image
     if ! ${SUDO}docker inspect "${DOCKERS[${1},IMAGE]}" >/dev/null >/dev/null
     then
         MESSAGE WARNING "Failed to install docker image '$1'. Archive problem?"
-        return 3
+        return 4
     fi
     return $IMG
 }
@@ -2434,6 +2443,7 @@ function ADD_CONTAINER(){
         if pgrep mosquitto >/dev/null && LISTENING ${MQTT_PORT:-1883} 
         then
             MESSAGE WARNING "MQTT 'mosquitto' service is already active on port ${MQTT_PORT:-1883}."
+	    LOGGER ERR "'${CNTR}' port ${MQTT_PORT:-1883} busy"
             return 1
         fi
     ;;
@@ -2445,8 +2455,12 @@ function ADD_CONTAINER(){
 	 MESSAGE ERROR "Not enough disk space for container '${CNTR}'" "Skipped"
          return 1
      ;;	 
-     3|4)
-         MESSAGE SKIPPED "Image for container '${CNTR}' cannot be installed" "Skipped"
+     4)
+         MESSAGE ERROR "Invalid container '${CNTR}' image"
+         return 1
+     ;;
+     3)
+         MESSAGE SKIPPED "Pull image container '${CNTR}' failure" "Skipped"
          return 1
      ;;
      2)
@@ -2468,6 +2482,7 @@ function ADD_CONTAINER(){
      ;;
      1)
          MESSAGE INFO "Container image '${CNTR}' is up to date."
+	 return 0
          # TO DO: check if container config needs to be changed
      ;;
      *)
@@ -2532,6 +2547,7 @@ function ADD_CONTAINER(){
 		    return 1
 		fi
                 MESSAGE INFO "Restarted the docker container '${CNTR}'."
+		LOGGER STATUS "Restarted container '${CNTR}'"
 	        return 0
 	    fi
 	fi
@@ -2552,7 +2568,7 @@ function ADD_CONTAINER(){
     # inform user about effective user of the container
     if [ -n "${DOCKERS[${CNTR},USER]/:*/}" ]   # ownership problems? See zigbee2mqtt dongle notes!
     then
-         MESSAGE NOTICE "Container '$CNTR' uses group $(groups ${DOCKERS[${CNTR},USER]/:*/} | sed -e 's/:/with/' -e 's/users/as users/')."
+         MESSAGE NOTICE "Container '$CNTR' uses group $(groups ${DOCKERS[${CNTR},USER]/:*/} | sed -e 's/:/with/' -e 's/users/as user/')."
     else
          MESSAGE NOTICE "Container '${CNTR}' will run as user '${DOCKERS[${CNTR},USER]:-anonymous}'."
     fi
@@ -2661,7 +2677,7 @@ EOF
     if (( $STATUS == 0 ))
     then
 	INSTALLED[${CNTR}]="${Green}Installed${Reset} container ${Black}$CNTR${Reset}, effective user ${Italic}${PRT:-anonymous}${Reset}, port(s): ${Italic}${PRTS:-None}${Reset}."
-	LOGGER NOTICE "Docker container '${CNTR}' successfully installed and  started."
+	LOGGER NOTICE "Docker container '${CNTR}' successfully installed and started."
     else
 	INSTALLED[${CNTR}]="${Red}Failed${Reset} to install container ${Italic}$CNTR${Reset}."
 	LOGGER ERR "Failed to install and run docker container '${CNTR}'."
@@ -2699,7 +2715,7 @@ function PURGE_APP(){
 
     if [ -n "$CNTRS" ] && ! pgrep -u root dockerd >/dev/null # docker deamon should be alive
     then
-        MESSAGE EMERG "Docker service deamon is not alive!"
+        MESSAGE EMERG "Docker service deamon is not alive!" # exit 1
     else
         for ONE in $CNTRS
         do
@@ -2719,8 +2735,7 @@ function PURGE_APP(){
             then
                 if echo $(${SUDO}docker ps --format '{{.ID}}' 2>/dev/null) | grep -q '[a-f0-9]' 
                 then
-                    MESSAGE EMERG "Purge first all docker images on this system!"
-                    return 1
+                    MESSAGE EMERG "Purge first all docker images on this system!" # exit 1
                 else
                     ${SUDO:-sudo} delgroup --quiet docker
                 fi
@@ -2865,6 +2880,7 @@ do                                             # maintenance actions
                     shift
                 fi
             done
+	    CURSOR_POS CURSOR                   # save cursor position for restore
             exit 0
         ;;
         dump|archive)          # create a tar archive of local container data
@@ -2883,6 +2899,7 @@ do                                             # maintenance actions
 	            fi
 	         fi
 	    done
+	    CURSOR_POS CURSOR                   # save cursor position for restore
 	    exit 0
 	;;
         restore)                                # restore local container data
@@ -2902,6 +2919,7 @@ do                                             # maintenance actions
 		     fi
 		fi
 	    done
+	    CURSOR_POS CURSOR                   # save cursor position for restore
 	    exit $?
 	;;
 	# add services, containers to be installed
@@ -2936,13 +2954,15 @@ BAR::INIT ; echo >$VERBOSE                       # set virtual window and clear 
 if [ -n "${DEAMONS}" ]                           # install/update first the deamons
 then
     MESSAGE STATE "OS system services"
-    MESSAGE INFO "Check if $USER has superuser credentials."
     MESSAGE NOTICE "Installing/upgrading system service(s): $(echo ${DEAMONS} | sed 's/ /, /g')."
+
+    MESSAGE NOTICE "Check if $USER has superuser credentials."
     if ! sudo true || ! sudo --validate          # sudo passwd is pushed to cache
     then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
-	exit 1
+	#exit 1
     fi
+
     for ITEM in ${DEAMONS}                       # ****** system service handling
     do
        if ! ADD_SERVICE "$ITEM"
@@ -2951,6 +2971,7 @@ then
            RTS+=1
        fi
     done
+
     if (( $RTS > 0 ))
     then
 	MESSAGE ALERT "$RTS failures to install services. Exiting."
@@ -2961,6 +2982,7 @@ if [ -n "${CONTAINERS}" ]                        # install/update docker contain
 then
     MESSAGE STATE "Installing/upgrading docker containers"
     MESSAGE NOTICE "Installing/upgrading docker container(s): $(echo ${CONTAINERS} | sed 's/ /, /g')."
+
     MESSAGE INFO "Check if $USER has docker credentials."
     if groups | grep -q -P "\sdocker" && systemctl --quiet is-active docker
     then
@@ -2968,8 +2990,9 @@ then
     elif ! sudo true || ! sudo --validate 
     then
 	MESSAGE CRIT "Superuser credentials are required! Exiting."
-	exit 1
+	#exit 1
     fi
+
     for ITEM in ${CONTAINERS}                    # ****** docker containers handling
     do
        declare -i BEFORE AFTER
@@ -2978,18 +3001,24 @@ then
        if ! ADD_CONTAINER "${ITEM,,}"
        then
            MESSAGE WARNING "Install/update docker container '${ITEM,,}' is skipped."
+	   LOGGER ERR "Error: skipped docker container '${ITEM,,}'"
            RTS+=1
        else
+	   LOGGER OK "Docker container '${ITEM,,}' is servicing"
            CHECK_FREESPACE "${ITEM}" AFTER
            MESSAGE DEBUG "Diskspace container ${ITEM} ($(( ${DOCKERS[${ITEM},MEM]} )) Mb). Installation took $(( ${BEFORE}-${AFTER} )) Mb diskspace."
-	   LOGGER INFO "Container install used $(( ${BEFORE}-${AFTER} )) Mb diskspace."
+	   if (( ${BEFORE} <= ${AFTER} ))
+           then
+	       LOGGER INFO "Container install used $(( ${BEFORE}-${AFTER} )) Mb diskspace."
+	   fi
            unset BEFORE AFTER
        fi
     done
+
 fi
 
 # ready, work done
-MESSAGE STATE "Wrap up what's done"
+MESSAGE STATE "Wrapping up"
 if (( "${#INSTALLED[@]}" > 0 ))
 then
     MESSAGE NOTICE "\nInstallation overview:"
@@ -2997,9 +3026,12 @@ then
     do MESSAGE NOTICE "${INSTALLED[$ITEM]}"
     done
 fi
+
 if (( $RTS > 0 ))
 then
     MESSAGE INFO "Unable to install/update ${RTS} of the ${#INSTALLED[@]} services and docker containers."
 fi
+
 #MESSAGE STATE "FINISHED"
+CURSOR_POS CURSOR                             # save cursor position for restore
 exit $RTS
