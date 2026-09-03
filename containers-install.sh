@@ -708,9 +708,10 @@ function UPDATE_SYSTEM() {
 #
 # ***************** MQTT service ****************************************
 # MOSQUITTO AUTH "$USER:passwd_string", if empty: anonymous
-MQTT_HOST=${HOSTIP:-localhost}      # default host for MQTT service
-
+#MQTT_HOST=${HOSTIP:-localhost}      # LAN host for MQTT service
+MQTT_HOST=localhost                 # default host for MQTT service
 MQTT_PORT=1883                      # default service port 1883
+MQTT_BRIDGE=8883                    # port in case there is a remote bridge active
 MQTT_USER=mosquitto                 # default MQTT service system owner: user:password
 MQTT_CLIENT=                        # allowed user client: dflt: anonymous, or user[:password]
 # installation configurations for docker containers
@@ -763,10 +764,14 @@ DOCKERS[homeassistant,CMD]=
 DOCKERS[homeassistant,DPTS]=mosquitto     # HAS needs mosquitto or mqtt5
 DOCKERS[homeassistant,PREP]="Preparation: Default homeassistant runs as user '${Black}${DOCKERS[homeassistant,USER]}${Reset}'.
 "
+DOCKERS[homeassistant,ADDONS]="
+HACS
+"
 DOCKERS[homeassistant,AFTER]="
 The docker container homeassistant will automatically start.
 Login via http://${HOSTIP}:8123  to allow HAS to start search for devices and install integrations.
 ${Red}Remark${Reset}: exported port e.g. 8123 can make the HAS service remote accessable.
+Homeassistant will add the addons: ${DOCKERS[homeassistant,ADDONS]}.
 "
 # default args: --name, --restart, --env TZ, --user, --publish, --volume /var/run/docker.sock
 
@@ -1806,7 +1811,7 @@ ${MQTT_USER/[a-zA-Z]*/user ${MQTT_USER/:*/}}
 #restart_timeout 5 30
 #try_private true
 pid_file /run/mosquitto/mosquitto.pid
-listener ${MQTT_PORT:-1883}
+listener ${MQTT_PORT:-1883} ${MQTT_BRIDGE}
 #persistence true
 #persistence_location /var/lib/mosquitto/
 log_dest file /var/log/mosquitto/mosquitto.log
@@ -2816,6 +2821,54 @@ ${ITEM}"
    return 0
 }
 
+# add ons after std installation of a docker container
+function ADD_CNTRaddons() {
+    local CNTR=${1,,}
+    function ADDons() {                # install all addons for a container
+	local cntr=$1 addons=$2 one ; declare -i rts=0
+	for one in $addons
+	do
+	    case ${cntr}_${one} in
+	    homeassistant_HACS)        # homeassistant addon HACS
+		${SUDO}docker stop homeassistant
+		${SUDO:-sudo} --user=${DOCKERS[$cntr,USER]:-root} bash
+		if ${SUDO:-sudo} sudo --user=${DOCKERS[$cntr,USER]:-root} bash <<<"
+		    cd ${DOCKERS[$cntr,HOME]}/config ; pwd ;\
+		    wget -O - https://get.hacs.xyz | bash - " \
+			tee -a ${TMP_DIR}/addons | grep 'INFO'
+                then
+		    MESSAGE OK "Installed addon '$one' for container '$cntr'."
+		else
+		    rts+=1
+		fi
+	    ;;
+            esac
+	done
+	if (( $rts > 0 ))
+	then
+	    MESSAGE ERR "${rts} errors installing '$addons' for container '$cntr'." 
+	    ERRORS addons
+        fi
+	rm -f ${TMP_DIR}/addons
+	return $rts
+    }
+
+    if [ -z "$1" ] || ! ${SUDO}docker ps -a | grep -q "${CNTR}"
+    then
+	MESSAGE ERR "No such docker container as '$CNTR'."
+	return 1
+    fi
+    case "$CNTR" in
+	homeassistant)
+	   if [ -n "${DOCKERS[$CNTR,ADDONS]}" ]
+           then
+	       ADDons "$CNTR" "${DOCKERS[$CNTR,ADDONS]}"
+	   fi
+        ;;
+    esac
+    return $?
+}
+
 # add containers or services on which the argument depends
 function CHK_DEPENDANT() {
     local CHK
@@ -3012,6 +3065,7 @@ then
 	       LOGGER INFO "Container install used $(( ${BEFORE}-${AFTER} )) Mb diskspace."
 	   fi
            unset BEFORE AFTER
+	   ADD_CNTRaddons($ITEM)
        fi
     done
 
