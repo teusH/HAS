@@ -2,7 +2,7 @@
 Home Assistant toolset, e.g. script to install  HAS with companion docker containers and service on RPi5.
 
 ## containers-install.sh
-Bash script to install docker containers family on RPi (work in progress): Home Assistant, Zigbee2MQTT, Mosquitto, WUD, Porttainer, etc.
+Bash script to install docker containers family on RPi (work in progress): Home Assistant, Zigbee2MQTT, Mosquitto, WUD, Portainer, etc.
 
 ### How to use this command:
 *containers-install.sh [--level=LEVEL|--debug|help|default|install|purge|container|upgrade/service ...]*
@@ -56,9 +56,12 @@ Optional arguments:
  Hint: save the dumps on a separate filesystem! To do: encrypt the archive.
  
 *restore container name ... * Restore a (compressed) container dump file or config file.
+
+*upgrade" (Full) upgrade of debian OS and applications.
          
+Notice: Side effect installing a container is the file 'setup.sh' is generated in the container home directory.
 If setup.sh is available or command option *help container* from script looks ok,
-one can rm with docker CLI the container and use docker run or compose to start container.<br/>
+one can rm with docker CLI the container and use docker run or compose to start container via setup.sh.<br/>
 
 **Advise**:<br/>
 Before installing a docker container one is advised to obtain some preparation information.
@@ -73,9 +76,9 @@ Docker container may use a serial dongle device. The group needed to access it i
 
 ### Available and configured debian installable services:
 
-    mosquitto       : Mosquitto system broker service for MQTT messages e.g. from zigbee2mqtt, tasmota, etc..
+    *mosquitto*       : Mosquitto system broker service for MQTT messages e.g. from zigbee2mqtt, tasmota, etc.
   
-    docker          : Docker container install and management system service/deamon..
+    *docker*          : Docker container install and management system service/deamon.
   
 Manage the debian service via CLI command (remote ssh):
 
@@ -83,23 +86,23 @@ Manage the debian service via CLI command (remote ssh):
 
 Available and configured docker containers:
 
-    go2rtc          : Video streaming service. WebGui on port 1984..
+    *go2rtc*          : Video streaming service. WebGui on *port 1984*.
   
-    homeassistant   : Home Assistant Systsem (HAS). WebGui on port 8123.
+    *homeassistant*   : Home Assistant Systsem (HAS). WebGui on *port 8123*.
   
-    lyrionmusic     : LyrionMusic Server for Lyrion Players. WebGui on port 9000..
+    *lyrionmusic*     : LyrionMusic Server for Lyrion Players. WebGui on *port 9000*.
   
-    matter          : Generalized device managing service for matter devices. Preferrable via Thread..
+    *matter*          : Generalized device managing service for matter devices. Preferrable via Thread.
   
-    mqtt5           : Mosquitto service (eclipse) for MQTT messages e.g. zigbee2mqtt, tasmota, etc. WebGui on port 1883. Not operational..
+    *mqtt5*           : Mosquitto service (eclipse) for MQTT messages e.g. zigbee2mqtt, tasmota, etc. WebGui on *port 1883*. Not operational.
   
-    portainer       : Portainer docker container (create/edit/stop/start) manager. WubGui on port 9002..
+    *portainer*       : Portainer docker container (create/edit/stop/start) manager. WubGui on *port 9002*.
   
-    wud             : Watch's Update Docker service. WebGui on port 3000..
+    *wud*             : Watch's Update Docker service. WebGui on *port 3000*.
   
-    zigbee2mqtt     : Zigbee to MQTT gateway service. WebGui on port 8080..
+    *zigbee2mqtt*     : Zigbee to MQTT gateway service. WebGui on *port 8080*.
   
-Manage docker containers via CLI command: *docker [ps|restart|stop|status] dockerContainerName*.<br/>
+Manage docker containers via CLI command: *docker [ps|restart|stop|status] dockerContainerName* or uset 'setup.sh' in the home directory (default /opt/containers/<container_name>) of the container.<br/>
 Or use (remote) *portainer* or *wud*.
 ### Security
 The script only uses sudo when needed. 
