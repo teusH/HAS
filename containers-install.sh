@@ -26,7 +26,8 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 4.7 $ $Date: 2026/08/30 14:38:18 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 4.8 $ $Date: 2026/09/21 13:13:16 $' | awk '{ printf("V%s_%s", $2,$5);}')
+#if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then echo "BASH DEBUG MODE" 1>&2 ; fi
 SCRIPT=$0                            # name of the script
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
@@ -472,7 +473,7 @@ function BAR::secs() {                # calibrate seconds, optional arg2: docker
 
     if (( BARfactor == 0 ))
     then
-	BARfactor=100                 # reference RPi5, usual SD card and 1G ethernet 
+	BARfactor=100                           # reference RPi5, usual SD card and 1G ethernet 
 	
 	ARCH=$(hostnamectl | grep -m 1 'Architecture: ' | sed 's/.*: //')
 	if [ -f /sys/firmware/devicetree/base/model ]
@@ -480,7 +481,13 @@ function BAR::secs() {                # calibrate seconds, optional arg2: docker
 	else ARCH+="/desktop"
 	fi
         # adjust to RPi model RPi4 (model B)
-        if echo "$ARCH" | grep -q 'Pi 4' ; then BARfactor=300 ; fi
+        if echo "$ARCH" | grep -q 'Pi 4'        # RPi 4
+	then BARfactor=300
+	elif echo "$ARCH" | grep -q 'x86-64/desktop'  # Intel desktop
+	then BARfactor=100
+	fi
+	# script is run with bashdb, increase timing
+	if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then BARfactor=$((2*${BARfactor})) ; fi
         # adjust to internet connectivity
 	NET=$(BAR::net)
 	if [ -n "$NET" ]
@@ -503,6 +510,7 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
    BARtiming=$(date +%s.%2N)
    BAR::secs ${secs} secs
    [ "$METERING" = on ] && LOGGER INFO "Progress meter for ${1:-undefined} estimated time ${secs} seconds."
+   [ -n "${_Dbg_DEBUGGER_LEVEL}" ] && return 0 # in bashdb modus the bar makes no sense
    (( secs < 4 )) && return 0                  # time too short for a progress bar
    (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
    (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710-(5*secs))/70 ))
@@ -519,9 +527,10 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
 function APT::filter() {
    awk '
       BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 }
-      /Get:[1-9]/||/Ophalen:[1-9]/||/afhandelen van triggers/{ item = $0;
+      /Get:[1-9]/||/Ophalen:[1-9]/||/afhandelen van triggers/||/Bezig met uitpakken/{ item = $0;
           sub("^.*Get:.*","Get",item); sub("^.*Ophalen:.*","Ophalen",item);
           sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
+          sub("^Bezig met uitpakken.*","Uitpakken",item);
       }
       /Get:[1-9]/||/^Unpacking/||/^Setting up/||/^Processing triggers/||/Ophalen:[1-9]/||/^Uitpakken/||/^Instellen/||/afhandelen van triggers/{
           if ( item == "" ) { item = $1; gsub(":","",item)}
@@ -530,7 +539,8 @@ function APT::filter() {
 		  item = "" ; prt = 0; fflush();
       }
       /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
-      /^Adding boot/||/^[dD]one/ {  printf("\n"); prt = 1}
+      /^Adding boot/||/^[dD]one/ {  printf("\n"); prt += 1; next;}
+      /^Running module/||/^  *- .*riginal module/||/^ - Installation/||/^depmod\.\./||/^$/{ next ; }
       { if( prt ) { print; fflush();} }
       END { printf("\ntiming: %d seconds\n",(systime() - timing)); fflush("") }
     '
@@ -564,7 +574,7 @@ function SHOW() {
     then log=/dev/null ; filter=cat
     fi
     [ "$log" != /dev/null ] && [ -d "${TMP_DIR}" ] && log="$TMP_DIR/$log"
-    tee -a "$log" | $filter >"$channel"
+    stdbuf -oL tee -a "$log" | $filter >"$channel"
     return $?
 }
 
@@ -590,7 +600,9 @@ function UPDATE_SYSTEM() {
            ;;
        autoremove)
 	   # auto remove returns #upgraded, #installed, #removable, #upgradeable
-	   nr=$(${SUDU:-sudo} apt-get autoremove --no-act --quiet 2>/dev/null | sed -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | cut -d ';' -f 3)
+	   nr=$(${SUDU:-sudo} apt-get autoremove --no-act --quiet 2>/dev/null | \
+	      sed -e '/^ A-Za-z]/d' -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | \
+	      cut -d ';' -f 3)
 	   mysecs=$(( ($nr)*115/100 ))
            ;;
        *) return 1                               # type not supported
@@ -3065,7 +3077,7 @@ then
 	       LOGGER INFO "Container install used $(( ${BEFORE}-${AFTER} )) Mb diskspace."
 	   fi
            unset BEFORE AFTER
-	   ADD_CNTRaddons($ITEM)
+	   ADD_CNTRaddons $ITEM 
        fi
     done
 
