@@ -26,13 +26,13 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 4.8 $ $Date: 2026/09/21 13:13:16 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 4.13 $ $Date: 2026/10/14 15:54:04 $' | awk '{ printf("V%s_%s", $2,$5);}')
 #if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then echo "BASH DEBUG MODE" 1>&2 ; fi
-SCRIPT=$0                            # name of the script
+SCRIPT=$(basename $0)
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
 HOSTIP=""                            # server ip address for container webUI access
-function HOSTIP() {
+function HOSTIP() {                  # detect external IP4 nr of this host
    if [ -n "$HOSTIP" ] ; then echo "$HOSTIP" ; return 0 ; fi
    HOSTIP=$(ifconfig | awk '/inet 1[09]/{ print $2; }' | sort -r | head -1)
    if ! echo "${HOSTIP:-localhost}" | grep -q -P '([0-9]{1,3}\.){3}[0-9]{1,3}'
@@ -42,8 +42,8 @@ function HOSTIP() {
    fi
    return 0
 }
-HOSTIP
-CURSOR=1:1
+HOSTIP                               # cache (remote) host IP4 nr. dflt localhost
+CURSOR=1:1                           # default last cursor position in window
 
 
 # define default logging level
@@ -101,7 +101,7 @@ then
 fi
 # installion logging file 
 TMP_DIR=$(mktemp -d /var/tmp/DocInst_XXXXXXXXXX)  # directory for temporary files
-TMP_LOG="./LOG-RUN_${0/%\.sh/.log}"               # save logging of the work done
+TMP_LOG="./LOG-RUN_${SCRIPT/%\.sh/.log}"          # save logging of the work done
 if [ -s "$TMP_LOG" ] ; then rm -f "$TMP_LOG" ; fi # clean up
 
 # just to make messages and logging colorfull
@@ -219,6 +219,7 @@ function MESSAGE() {
     then                                   # state of script progress messages
         (( ${LEVEL[NOTICE]:-2} < ${LEVEL[$MSG]:-4} )) && return 0
         local COLOR
+	# BAR::printbar " "                  # clear window bottum line
         case "${1^^}" in
                 STATE|STATUS) COLOR="$(tput setab 123; tput setaf 0)${Bold}"
                 ;;
@@ -312,8 +313,21 @@ function ERRORS() {
 # print in virtual bottum window progress messages
 # arg1 max seconds, arg2 prints per second, arg3 if TIMING print elapsed time
 # arg3/4 use different title progress bar
-function BAR::PRINT() {
-   declare -i percent=100 secs=${2:-60} freq=${3:-4} cur=0 step=0
+function BAR::printbar() {     # print bar on bottom window
+   tput sc                     # Save cursor position
+   tput cup $(( LINES-1 )) 0   # Move to last row
+   if [ -n "$1" ]
+   then
+       #tput setab 4; tput setaf 7  # Blue background, white text
+       echo -n "$1"            # Print left aligned info
+   fi
+   tput el                     # Clear to end of line
+   tput sgr0                   # Reset colors
+   tput rc                     # Restore cursor position
+}
+
+function BAR::PRINT() {        # generate title, progress bar, eleapsed secs and print BAR
+   declare -i percent=100 secs=${2:-60} freq=${3:-4} parent=$4 cur=0 step=0
    (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
    (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710-5*secs)/70 ))
    # max seconds,frequency per second convert step to percentage
@@ -329,23 +343,11 @@ function BAR::PRINT() {
    }
    trap BAR::stop SIGINT SIGTERM
    trap "" EXIT
-   function BAR::printbar() {
-      tput sc                     # Save cursor position
-      tput cup $(( LINES-1 )) 0     # Move to last row
-      if [ -n "$1" ]
-      then
-          #tput setab 4; tput setaf 7  # Blue background, white text
-          echo -n "$1"            # Print left aligned info
-      fi
-      tput el                     # Clear to end of line
-      tput sgr0                   # Reset colors
-      tput rc                     # Restore cursor position
-   }
 
    # calculate seconds to percentage max 100
    if [ -n "$1" ] ; then title="$1" ; fi
 
-   while (( cur <= (percent*120+step) ))    # start producing progress bar
+   while (( cur <= (percent*220+step) ))    # start producing progress bar
    do
       (( $STOP == 1 )) && break   # stop bar stepping up
       declare -i  cols=$(tput cols)
@@ -358,6 +360,10 @@ function BAR::PRINT() {
       # prepair to print the progress bar
       if (( ${#bar} > cols ))
       then
+	  if ! kill -USER1 $parent 2>/dev/null >/dev/null # parent still alive?
+          then
+	       return 1
+	  fi
 	  if (( $( bc <<< "$cursecs > $secs*1.1") > 0 ))
           then
               bckgrnd="$(tput setab 1; tput setaf 7)"
@@ -515,7 +521,7 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
    (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
    (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710-(5*secs))/70 ))
    BAR::INIT
-   BAR::PRINT "${1:-  }" ${secs} ${freq} &     # start USR1 signaler freq 3 per sec
+   BAR::PRINT "${1:-  }" ${secs} ${freq} "$$" &     # start USR1 signaler freq 3 per sec
    BARrunning=$!
    echo
    return 0
@@ -523,6 +529,56 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
 # #######################  END of progress BAR package
 
 # ###########################
+# install service or application via apt
+function APT::install() {
+    local SRVR RTS=0 APTS
+    for SRVR in $@
+    do
+	if [ -n "${SERVICES[$SRVR,APP]}" ]
+	then
+	    for SRVR in ${SERVICES[$SRVR,APP]}
+	    do
+		! apt list --installed 2>/dev/null | grep -q "^$SRVR/" && APTS+="$SRVR "
+	    done
+	else
+	    ! apt list --installed 2>/dev/null | grep -q "^$SRVR/" && APTS+="$SRVR "
+	fi
+    done
+    [ -z "$APTS" ] && return 0
+    UPDATE_SYSTEM
+    MESSAGE NOTICE "Install OS (${APTS// /, }) packages.\nCan take a while..."
+    BAR::START "$SRVR install" 75 OS
+    for SRVR in $APTS
+    do
+      case "${SRVR}" in
+        https://*|file://*)
+          MESSAGE INFO "Install ${SRVR} package via bash script."
+          # docker.com installs with bash file, debug with --dry-run
+          curl -sSL ${$SRVR} >${TMP_DIR}/install && \
+              ${SUDO:-sudo} stdbuf -o L bash ${TMP_DIR}/install 2>&1 | \
+              tee -a $TMP_DIR/msg | grep -v '^+ sh -c'
+        ;;
+        *)                                   # default just SRVR name is used
+          MESSAGE INFO "Install ${SRVR} OS package."
+          ! apt list --installed 2>/dev/null && \
+              ${SUDO:-sudo} stdbuf -oL apt-get install $SRVR -y -qq 2>&1 | \
+              APT::show log="${SRVR}" priority=NOTICE filter="APT::filter"
+        ;;
+      esac
+      if (( $? > 0 ))
+      then
+         ERRORS msg                        # failure save errors messages
+         BAR::STOP
+         MESSAGE ALERT "Docker installation failed.\nSee logging ${TMP_DIR}."
+         exit 1
+      fi
+    done
+    BAR::STOP # timing
+    rm -f ${TMP_DIR}/{msg,install}
+
+    return $RTS
+}
+
 # filter function for apt upgrade logging. Support for LANGUAGE NL and UK/US
 function APT::filter() {
    awk '
@@ -536,18 +592,20 @@ function APT::filter() {
           if ( item == "" ) { item = $1; gsub(":","",item)}
           if( item == cur ) { printf("\r%s: %d", item, ++cnt)}
           else { cur = item; cnt = 0; printf("\n%s: %d", item, ++cnt)}
-		  item = "" ; prt = 0; fflush();
+	  item = "" ; prt = 0;
       }
       /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
+      /^Found:/ { printf("\n%s", $0);}
+      /^\(Database /{ prt = 0; printf("\n%s", $0);}
       /^Adding boot/||/^[dD]one/ {  printf("\n"); prt += 1; next;}
       /^Running module/||/^  *- .*riginal module/||/^ - Installation/||/^depmod\.\./||/^$/{ next ; }
-      { if( prt ) { print; fflush();} }
+      { if( prt ) { print; } ; fflush(); }
       END { printf("\ntiming: %d seconds\n",(systime() - timing)); fflush("") }
     '
 }
 
 # filter output and log
-function SHOW() {
+function APT::show() {
     # function [ArchiveFileName priority filter channel, dflts: /dev/null 
     local log=/dev/null priority=ERR filter=cat channel=${VERBOSE:-/dev/stderr}
     while  [ -n "$1" ]
@@ -579,6 +637,21 @@ function SHOW() {
 }
 
 # check if system needs to be updated. Update if last update was older as a week ago
+UPGRADE_CNT=                                      # nr of upgradable packages. Dlft: undefined
+function CNT_UPGRADABLE() {
+   [ -n "$UPGRADE_CNT" ] && return $UPGRADE_CNT   # check only once in the script
+   MESSAGE STATE "Checking OS system for updates"
+   # check if there are upgradeable packages
+   ${SUDU:-sudo} apt update -qq 2>/dev/null >/dev/null
+   UPGRADE_CNT=$(${SUDU:-sudo} apt list --upgradable 2>/dev/null | grep --count '/')
+   if (( $UPGRADE_CNT == 0 ))
+   then
+        MESSAGE INFO "OS system is up to date."
+   fi
+   return $UPGRADE_CNT
+}
+
+# upgrade the OS system
 function UPDATE_SYSTEM() {
    declare -i RTS=0 CNT=0 ; local delay
    #
@@ -591,25 +664,23 @@ function UPDATE_SYSTEM() {
        type=${1,,} ; sudo true                    # sudo cache update
        case ${1,,} in
        full-upgrade)
-           nr=$(${SUDU:-sudo} apt list --upgradable 2>/dev/null | grep --count '/')
-	   mysecs=$(( ($nr*7)*115/100 ))
+	   CNT_UPGRADABLE ; nr=$? ; mysecs=$(( ($nr*7)*155/100 ))
            ;;
        upgrade)
-           nr=$(${SUDU:-sudo} apt list --upgradable 2>/dev/null | grep --count '/')
-	   mysecs=$(( ($nr)*115/100 ))
+	   CNT_UPGRADABLE ; nr=$? ; mysecs=$(( ($nr)*220/100 ))
            ;;
        autoremove)
 	   # auto remove returns #upgraded, #installed, #removable, #upgradeable
 	   nr=$(${SUDU:-sudo} apt-get autoremove --no-act --quiet 2>/dev/null | \
-	      sed -e '/^ A-Za-z]/d' -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | \
+	      sed -e '/^[ A-Za-z]/d' -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | \
 	      cut -d ';' -f 3)
 	   mysecs=$(( ($nr)*115/100 ))
            ;;
-       *) return 1                               # type not supported
+       *) return 1                                 # type not supported
            ;;
        esac
        printf -v "${2:-fake}" "%d:0" $nr
-       (( ${nr} <= 0 )) && return 0              # nothing to do
+       (( ${nr} <= 0 )) && return 0                # nothing to do
 
        MESSAGE NOTICE "Trying to ${type/full-/fully} ${nr} OS system packages."
        local tuned
@@ -629,26 +700,26 @@ function UPDATE_SYSTEM() {
 	   echo "$(tput cuu 1; tput el)" >$VERBOSE
        else ans=no
        fi
-       if [ "$ans" = no ]                        # do not skip upgrade
+       if [ "$ans" = no ]                          # do not skip upgrade
        then
 	   case "${type}" in
 	       full-upgrade)
 	       BAR::START "OS ${type^^}:" ${mysecs}
                ${SUDO:-sudo} stdbuf -oL apt-get --yes --quiet ${type,,} 2>/dev/null | \
-		   SHOW log=OSupgrade priority=NOTICE filter="APT::filter"
+		   APT::show log=OSupgrade priority=NOTICE filter="APT::filter"
 	       ;;
 	       upgrade)
 	       BAR::START "OS ${type^^}:" ${mysecs}
                ${SUDO:-sudo} stdbuf -o L apt-get --yes --quiet ${type,,} 2>/dev/null | \
-	           SHOW log=OSupgrade priority=NOTICE filter="APT::filter"
+	           APT::show log=OSupgrade priority=NOTICE filter="APT::filter"
 	       ;;
 	       autoremove)
 	       BAR::START "OS ${type^^}:" ${mysecs}
-               stdbuf -oL ${SUDO:-sudo} apt autoremove --quiet 2>/dev/null | \
-		   SHOW log=OSupgrade priority=NOTICE
+               stdbuf -oL ${SUDO:-sudo} apt autoremove --assume-yes --quiet 2>/dev/null | \
+		   APT::show log=OSupgrade priority=NOTICE
 	       ;;
            esac
-	   (( $? > 0 )) && rts=1                 # errors
+	   (( $? > 0 )) && rts=1                   # errors
            BAR::STOP # timing
 	   (( rts == 1 )) && ERRORS OSupgrade && return 1
 	   #(( ${timing:-0} > $mysecs )) && \
@@ -656,27 +727,16 @@ function UPDATE_SYSTEM() {
        fi
        local fld=4 rest=0
        fld=4 ; [ "${type}" = autoremove ] && fld=3
-       rest=$(${SUDU:-sudo} apt-get autoremove --no-act --quiet 2>/dev/null | sed -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | cut -d ';' -f ${fld})
-       printf -v "${2:-fake}" "%d:%d" $nr $rest
+       rest=$(${SUDU:-sudo} apt-get autoremove --no-act --assume-yes --quiet 2>/dev/null | sed -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | cut -d ';' -f ${fld})
+       printf -v "${2:-fake}" "%d:%d" $nr $rest    # TO DO: some packages will be in the wait queue!
        return 0
    }
 
-   # check if there are upgradeable packages
-   CNT=$(${SUDU:-sudo} apt list --upgradable 2>/dev/null | grep --count '/')
-   if (( $CNT == 0 ))
-   then
-	${SUDU:-sudo} apt update 2>/dev/null >/dev/null # seems we need to check again
-        CNT=$(${SUDU:-sudo} apt list --upgradable 2>/dev/null | grep --count '/')
-	if (( $CNT == 0 ))
-	then
-            MESSAGE INFO "OS system is up to date."
-            return 0
-	fi
-   fi
+   CNT_UPGRADABLE && return 0
    MESSAGE STATE "Upgrading OS system packages"
    # try a basic OS packages update
    local todo rts=0
-   if UPGRADE upgrade todo                       # upgrade basic packages
+   if UPGRADE upgrade todo                         # upgrade basic packages
    then
        local pkgs=${todo/:*/}
        if (( ${todo/*:/} > 0 ))
@@ -696,7 +756,7 @@ function UPDATE_SYSTEM() {
 	   then
 	       INSTALLED[OSsystem]="${Green}Installed${Reset} ${rts/0/Upgraded ${Bold}$pkgs packages${Reset}. }"
 	       (( (${todo/:*/} - ${todo/*:/}) > 0 )) && \
-		       INSTALLED[OSsystem]+=" Removed $(( ${todo/:*/}-${todo/*:/} )) deprecated OS packages."
+		 INSTALLED[OSsystem]+=" Removed $(( ${todo/:*/}-${todo/*:/} )) deprecated packages."
 	   fi
        else
            rts=1
@@ -706,31 +766,18 @@ function UPDATE_SYSTEM() {
        rts=1
    fi
    if (( ${rts} == 0 ))
-   then MESSAGE OK "OS system is up to date."
+   then MESSAGE OK "Updated the OS system."
    else ERRORS OSupgrade && MESSAGE SKIPPED "OS system full upgrade not completed."
    fi
    rm -f ${TMP_DIR}/OSupgrade
+   UPGRADE_CNT=0                                  # upgraded as far as possible. Do not try again.
    return $rts
 }
 
-# ###########################
-
 # #######################################################################
 # ******************* services and docker containter definitions ********
-#
-# ***************** MQTT service ****************************************
-# MOSQUITTO AUTH "$USER:passwd_string", if empty: anonymous
-#MQTT_HOST=${HOSTIP:-localhost}      # LAN host for MQTT service
-MQTT_HOST=localhost                 # default host for MQTT service
-MQTT_PORT=1883                      # default service port 1883
-MQTT_BRIDGE=8883                    # port in case there is a remote bridge active
-MQTT_USER=mosquitto                 # default MQTT service system owner: user:password
-MQTT_CLIENT=                        # allowed user client: dflt: anonymous, or user[:password]
-# installation configurations for docker containers
-# configuration options: use ! char to indicate spaces. Will be converted to spaces.
 
-# ***************** docker containers **********************************
-#
+# ***************** docker containers ***********************************
 # default volume options timezone and docker.sock
 DEFAULT_OPTIONS="
     --volume=/etc/localtime:/etc/localtime:ro
@@ -738,7 +785,7 @@ DEFAULT_OPTIONS="
 # container installation definitions should be in a sort of library database
 declare -A DOCKERS                  # array with container installation details
 
-# ************************** HOMEASSTANT *******************************
+# ************************** HOMEASSTANT ********************************
 # see also: https://www.homeautomationguy.io/blog/home-assistant-tips/installing-docker-home-assistant-and-portainer-on-ubuntu-linux
 # container HOMEASSISTANT WEBgui on port 8123
 # service description
@@ -773,7 +820,7 @@ DOCKERS[homeassistant,ENV]="
     --env=TZ=Europe/Amsterdam
 "
 DOCKERS[homeassistant,CMD]=
-DOCKERS[homeassistant,DPTS]=mosquitto     # HAS needs mosquitto or mqtt5
+DOCKERS[homeassistant,DEP]=mosquitto     # HAS needs mosquitto or mqtt5
 DOCKERS[homeassistant,PREP]="Preparation: Default homeassistant runs as user '${Black}${DOCKERS[homeassistant,USER]}${Reset}'.
 "
 DOCKERS[homeassistant,ADDONS]="
@@ -848,7 +895,7 @@ DOCKERS[zigbee2mqtt,ENV]="
 
 # if needed command arguments
 DOCKERS[zigbee2mqtt,CMD]=
-DOCKERS[zigbee2mqtt,DPTS]=mosquitto       # container depends on service mosquitto to run
+DOCKERS[zigbee2mqtt,DEP]=mosquitto       # container depends on service mosquitto to run
 DOCKERS[zigbee2mqtt,PREP]="Preparation: Default zigbee2mqtt runs as user '${Black}${DOCKERS[zigbee2mqtt,USER]}${Reset}'.
 Make sure you identify where the Zigbee dongle is available. E.g. ls /dev/serial/by-id/ or change that in the configuration.
 "
@@ -972,7 +1019,7 @@ DOCKERS[matter,ENV]="
 # WITH BLUETOOTH LOCAL COMMISIONING add cmd args after image:
 #      --storage-path /data --paa-root-cert-dir /data/credentials --bluetooth-adapter 0
 DOCKERS[matter,CMD]=""
-DOCKERS[matter,DPTS]=homeassistant
+DOCKERS[matter,DEP]=homeassistant
 DOCKERS[matter,PREP]="Preparation: Default matter runs as user '${Black}${DOCKERS[matter,USER]:-anonymous}${Reset}'.
 "
 DOCKERS[matter,AFTER]="
@@ -985,7 +1032,7 @@ See: https://www.home-assistant.io/integrations/matter/
 # this is not operational!!!
 # thanks to: https://github.com/sukesh-ak/setup-mosquitto-with-docker
 # container MQTT (containers update server) Alternative to mosquitto service
-DOCKERS[mqtt5]="Mosquitto service (eclipse) for MQTT messages e.g. zigbee2mqtt, tasmota, etc. WebGui on port ${MQTT_PORT:-1883}. Not operational."
+DOCKERS[mqtt5]="Mosquitto service (eclipse) for MQTT messages e.g. zigbee2mqtt, tasmota, etc. WebGui on port ${SERVICES[mosquitto,PORT]:-1883}. Not operational."
 # container minimal disk space MB initial + operational space
 DOCKERS[mqtt5,MEM]=400+10
 # docker container data (home) directory base
@@ -994,7 +1041,7 @@ DOCKERS[mqtt5,IMAGE]=eclipse-mosquitto
 DOCKERS[mqtt5,NAME]=mqtt5
 DOCKERS[mqtt5,USER]=mosquitto
 DOCKERS[mqtt5,DFLT]=${DEFAULT_OPTIONS}
-DOCKERS[mqtt5,PORT]="--publish=${MQTT_PORT:-1883}:1883"
+DOCKERS[mqtt5,PORT]="--publish=${SERVICES[mosquitto,PORT]:-1883}:1883"
 DOCKERS[mqtt5,PORT]+="
     --publish=9001:9001"
 DOCKERS[mqtt5,DATA]="
@@ -1091,28 +1138,55 @@ https://www.homeautomationguy.io/blog/home-assistant-tips/installing-docker-home
 # ***************************** END CONTAINER RUN DEFS ******************
 
 # ################# services configurations #############################
-# ***************** DOCKER **********************************************
-# either via open source apt, or via docker.com ???
-# DOCKER container service apps
-DOCKERdotCOM=YES                       # to disable make this empty
-# or use:
-DOCKER_APPS="docker-buildx-plugin docker-rootless-extras docker.io"
+declare -A SERVICES
+SERVICES[upgrade]="OS system check OS for updates and apply (full) upgrades"
+
+# ***************** DOCKER *********************************************
+SERVICES[docker]="Docker container install and management system service/deamon."
+SERVICES[docker,APP]=https://get.docker.com  # use docker from docker.com
+# or use docker from debian repro         fall back is default
+#SERVICES[docker,APP]="docker-buildx-plugin docker-rootless-extras docker.io"
 # DOCKER EXTRA packages
 # python only needed if python docker API is used, not yet needed
 # compose if compose is used, not yet needed
-#DOCKER_ADDON="docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose python3-docker"
-# how to get more inside of running docker containers:
-# hint: see docker documentation for usefull commands as 'ps', 'ls', 'cp', 'exec', 'logs', etc.
-DOCKER_ADDON=python3-docker
+#ADDON="docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose python3-docker"
+SERVICES[docker,ADDON]=python3-docker  # install docker addons
 # use python script inspect.py to check docker run args with running containers
 
-declare -A SERVICES
-SERVICES[upgrade]="OS system check OS for updates and apply (full) upgrades"
-SERVICES[docker]="Docker container install and management system service/deamon."
-SERVICES[mosquitto]="Mosquitto system broker service for MQTT messages e.g. from zigbee2mqtt, tasmota, etc."
-MQTT_CONF=/etc/mosquitto/conf.d/HAS.conf
+# DOCKER EXTRA packages
+# python only needed if python docker API is used, not yet needed
+# compose if compose is used, not yet needed
+# how to get more inside of running docker containers:
+# hint: see docker documentation for usefull commands as 'ps', 'ls', 'cp', 'exec', 'logs', etc.
 
-# ***************************** END SERVICES CONFIG DEFS ****************
+# ***************** MOSQUITTO ******************************************
+SERVICES[mosquitto]="Mosquitto system broker service for MQTT messages e.g. from zigbee2mqtt, tasmota, etc."
+SERVICES[mosquitto,CONF]=/etc/mosquitto/conf.d/HAS.conf  # mqtt configuration file for HAS
+# next will be used by optional/alternative MQTT docker container config as well
+# HOST=${HOSTIP:-localhost}            # LAN host for MQTT service
+SERVICES[mosquitto,HOST]=localhost     # default host for MQTT service
+SERVICES[mosquitto,PORT]=1883          # default service port 1883
+SERVICES[mosquitto,BRIDGE]=8883        # port in case there is a remote bridge active
+SERVICES[mosquitto,USER]=mosquitto     # default MQTT service system owner: user:password
+SERVICES[mosquitto,PREP]="MQTT credentials: either anonymous (dlft) or MQTT_USER:USER_PASSWORD.
+Use environment var MQTT_CRED=${MQTT_CRED:-MQTT_USER:USER_PASSWORD} to enable credential check."
+SERVICES[mosquitto,CLIENT]=${MQTT_CRED} # allowed user client: dflt: anonymous, or user[:password]
+
+# ***************** AUTOFS *********************************************
+SERVICES[autofs]="Autofs service to access NAS server for archives and backups."
+# /etc/auto.master add: /- /etc/autofs.SMB.shares --timeout 15 browse
+# /etc/autofs.SMB.shares: ${BACKUP_DIR} -fstype=cifs,rw,credentials=/etc/autofs.SMB.credentials,dir_mode=0750,file_mode=0640 :$NAS_SMB
+SERVICES[autofs,PREP]="Define SMB share server and share. E.g. use env var AUTOFS_SHARE=//smb_server/share, or via interaction if not defined."
+SERVICES[autofs,SHARE]=${AUTOFS_SHARE}   # samba smb //host/archive_dir
+# using samba smb conventional authorisation. Alternative is Kerberos.
+# /etc/autofs.SMB.shares: ${BACKUP_DIR} -fstype=cifs,rw,username=${CRED/,*/},password=${CRED/*,/},dir_mode=0750,file_mode=0640 :$SMB
+# /etc/auto.SMB.credentials: username=${NAS_CREDENTIALS/,*/}\npassword=${NAS_CREDENTIALS/*,/}\ndomain=optional
+SERVICES[autofs,PREP]+="
+Define SMB via enviromment var SMB_CLIENT=SMB_USER:SMB_PASSWORD to use non guest credentials.
+Default: public access. Make sure smb server configuration e.g. /etc/samba/smb.conf is configured."
+SERVICES[autofs,CLIENT]=${SMB_CLIENT}
+
+# ***************************** END SERVICES CONFIG DEFS ***************
 
 # #######################################################################
 # **************************** script functions *************************
@@ -1246,7 +1320,7 @@ function CMD_RUN_CNTR() {
     local CNTR=$1 TYPE ID INFO=''
     INFO+="\n    Optional webGUI access of container '${Black}$CNTR${Reset}':"
     INFO+="\n    ${DOCKERS[$CNTR]}"
-    local RTS=0 ITEM D
+    local rts=0 ITEM D
     # compile run argument list
     for TYPE in LABEL NAME DFLT USER OPTIONS ENV DATA PORT DEVICE # sorted list of docker run options
     do
@@ -1254,7 +1328,7 @@ function CMD_RUN_CNTR() {
         then
              MESSAGE ERR "Container '$CNTR' with type '$TYPE' needs UNDEFINED completed. Skipped."
              MESSAGE NOTICE "See: $(echo "${DOCKERS[$CNTR,$TYPE]}" | grep UNDEFINED)"
-             RTS=1
+             rts=1
         fi
 
         case "$TYPE" in
@@ -1406,7 +1480,7 @@ function CMD_RUN_CNTR() {
     # TMP_DIR/args has CLI 'docker run --detach' arguments
     awk '/^ *$/{ next ;} { print; }' $TMP_DIR/args # delete empty lines
     rm -f $TMP_DIR/args
-    return $RTS
+    return $rts
 }
 
 # ##################################################################
@@ -1555,6 +1629,7 @@ ${Black}TO DO${Reset}:
             echo -e "\n${Black}Available and configured debian installable services${Reset}:"
             for CNTR in ${!SERVICES[@]}
             do
+	       [ -z "${CNTR/*,*/}" ] && continue
                printf "  ${Blue}%-16s${Reset}\n     %s\n" "${CNTR}" "${SERVICES[$CNTR]}."
             done
             echo -e "Manage the debian service via CLI command (remote ssh):\n  ${Black}sudo systemctl {start|restart|stop|status|enable} ${Italic}service_name${Reset}."
@@ -1644,7 +1719,7 @@ ${Black}TO DO${Reset}:
                  echo "${DOCKERS[$CNTR,AFTER]}"
             fi
             echo -e "Manage docker containers via CLI command:\n  '${Black}docker {ps|restart|stop|status} ${Italic}$CNTR${Reset}'.\nOr use (remote) '${Black}portainer${Reset}' or '${Black}wud${Reset}'."
-        elif echo "${!SERVICES[@]}" | grep -q "${CNTR}"
+        elif echo "${!SERVICES[@]}" | grep -v ',' |  grep -q "${CNTR}"
         then
             systemctl --quiet is-active ${CNTR}       # check already installed/running
             case $? in
@@ -1658,7 +1733,15 @@ ${Black}TO DO${Reset}:
             echo -e "${Blue}${CNTR}${Reset} is installed and active."
             ;;
             esac
+	    if [ -n "${SERVICES[${CNTR},PREP]}" ]
+	    then
+		echo -e "${RED}Preparations for installing ${CNTR}${Reset}:\n${SERVICES[${CNTR},PREP]}"
+	    fi
             echo -e "Manage the debian service via CLI command (remote ssh):\n  ${Black}sudo systemctl {start|restart|stop|status|enable} ${Italic}$CNTR${Reset}."
+	    if [ -n "${SERVICES[${CNTR},AFTER]}" ]
+	    then
+		echo -e "${RED}Information after installing ${CNTR}${Reset}:\n${SERVICES[${CNTR},AFTER]}"
+	    fi
         else
             echo -e "Name '${Red}$CNTR${Reset}' as docker container name is not defined in DOCKERS list."
         fi
@@ -1670,58 +1753,27 @@ ${Black}TO DO${Reset}:
 # from https://github.com/sukesh-ak/setup-mosquitto-with-docker/blob/main/install-docker.sh
 # ref: https://docs.docker.com/engine/install/debian/#install-using-the-repository
 # docker service is not installed to be remotely accessable for security reasons.
-function INSTALL_DOCKER(){
-    if [ -n "$DOCKERdotCOM" ] # install using docker.com Linux install script
-    then
-        MESSAGE NOTICE "Install docker from get.docker.com. Can take a while..."
-        # disadvantage: docker will not be updated automatically
-	BAR::START "docker core install" 75 OS
-        curl -sSL https://get.docker.com >${TMP_DIR}/install
-        if [ -n "${DEBUG}" ]
-        then
-            MESSAGE DEBUG "Dry run docker installation:"
-            ${SUDO:-sudo} bash ${TMP_DIR}/install --dry-run
-        else
-            if ! ${SUDO:-sudo} stdbuf -o L bash ${TMP_DIR}/install 2>&1 | tee -a $TMP_DIR/msg | grep -v '^+ sh -c'
-            then
-                 ERRORS msg    # save errors messages
-		 BAR::STOP
-                 MESSAGE ALERT "Docker installation failed.\nSee logging ${TMP_DIR}."
-                 exit 1
-            fi
-        fi
-	BAR::STOP # timing
-        rm -f ${TMP_DIR}/{msg,install}
-    else
-        MESSAGE NOTICE "Installation of docker container service apps: ${DOCKER_APPS}."
-        BAR::START "docker std install" 45
-        if ! stdbuf -o L ${SUDO:-sudo} apt install ${DOCKER_APPS} -y -q 2>/dev/null | \
-	       SHOW log=apps priority=NOTICE
-        then
-             BAR::STOP
-             ERRORS apps
-             MESSAGE ALERT "Docker installation 'apt install ${DOCKER_APPS}' failed!"
-             exit 1
-        fi
-        BAR::STOP
-        rm -f ${TMP_DIR}/apps
-    fi
-    
+#
+# check if docker is running and managing containers
+function TEST_DOCKER() {
     # Create hello world container to test :) 
-    MESSAGE DEBUG "Check docker is running OK"
     if ! ${SUDO}docker run hello-world 2>&1 | grep -q  'Hello from Docker'
-    then MESSAGE EMERG "Docker service failed to install." #exit 1
-    fi
-
-    # install docker add on applications and/or libraries
-    if [ -n "${DOCKER_ADDON}" ]
     then
-        MESSAGE INFO "Docker add on's installation: ${DOCKER_ADDON// /, }."
-        BAR::START "install add-ons" 5
-        # ${SUDO:-sudo} apt-get update -qq
-        stdbuf -o L ${SUDO:-sudo} apt-get install ${DOCKER_ADDON} -y -qq | \
-		SHOW log=apps priority=NOTICE
-        BAR::STOP # timing
+        MESSAGE EMERG "Docker service failed to install." #exit 1
+    else
+        MESSAGE INFO "Check docker is running OK"
+    fi
+    return 0
+}
+
+function CONFIG_DOCKER(){
+    local SRVR=${1:-docker}
+    
+    # install docker add on applications and/or libraries
+    if [ -n "${SERVICES[$SRVR,ADDON]}" ]
+    then
+        MESSAGE INFO "Docker add on's installation: ${SERVICES[$SRVR,ADDON]// /, }."
+        APT::install ${SERVICES[$SRVR,ADDON]}
     fi
 
     if ! [ -d "${DOCKERDIR}" ]                 # check if docker containers directory exists
@@ -1741,59 +1793,41 @@ function INSTALL_DOCKER(){
     else
         SUDO=
     fi
+    TEST_DOCKER
+    return $?
 }
 
-# install mosquitto service
-function INSTALL_MOSQUITTO() {
-    if LISTENING ${MQTT_PORT:-1883} REMOTE
+# check on anonimous message acceptation
+function TEST_MOSQUITTO() {
+    if ! mosquitto_pub --host ${HOSTIP} -t test -m OK --quiet
     then
-         MESSAGE WARNING "There is already an MQTT service running on port ${MQTT_PORT:-1883}. Skipping installation."
-         return 1
-    fi 
-    MESSAGE INFO "Installing mosquitto service, mosquitto add on's, local config and passwd file."
-    BAR::START "Install mosquitto" 11
-    ${SUDO:-sudo} apt-get update -qq           # update system libraries first
-    if ! ${SUDO:-sudo} stdbuf -oL apt-get install mosquitto -y -qq 2>&1 | \
-	    SHOW log=mosquitto priority=NOTICE filter="APT::filter"
-    then
-        BAR::STOP
-        MESSAGE ERROR "Failed to install system service $SRVR."
-        ERRORS mosquitto
+         MESSAGE ALERT "Mosquitto service is not accepting anonymous messages.\n Check logging mosquitto."
+	 return 1
+    else
+	 MESSAGE INFO "Mosquitto is accepting messages."
     fi
-    BAR::STOP # timing
-    rm -f ${TMP_DIR}/mosquitto
+    return 0
+}
 
-    if ! which mosquitto_sub >/dev/null 2>/dev/null
-    then
-        MESSAGE INFO "Install $SRVR clients for MQTT debugging."
-        BAR::START "mosquitto clients" 4
-        if ! ${SUDO:-sudo} stdbuf -o L apt install ${SRVR}-clients -y -qq 2>/dev/null | \
-		SHOW log=${SRVR}-clients priority=NOTICE filter="APT::filter"
-        then
-            BAR::STOP
-            MESSAGE WARNING "Failed to install '${RSVR}-clients'."
-            ERRORS mosquitto
-        fi
-        BAR::STOP # timing
-    fi
-    rm -f ${TMP_DIR}/mosquitto
-
-    ${SUDO:-sudo} systemctl --quiet enable mosquitto 2>/dev/null
+# configure mosquitto as used by zigbee2mqtt and other containers
+function CONFIG_MOSQUITTO() {
+    # just for debugging purposes install mosquitto clients
+    ! which mosquitto_sub >/dev/null 2>/dev/null && APT::install ${SRVR}-clients
 
     # authentication of subscribers and publishing clients
-    if [ -n "${MQTT_USER/:*/}" ]
+    if [ -n "${SERVICES[mosquitto,USER]/:*/}" ]
     then
         MESSAGE NOTICE "Change user/pwd mosquitto with 'man mosquitto_passwd' (/etc/mosquitto/pwdfile)"
         MESSAGE NOTICE "See 'man mosquitto.conf' for more security configuration info."
         MESSAGE NOTICE "You need to change the mosquitto conf file in /etc/mosquitto/conf.d."
         ${SUDO:-sudo} touch /etc/mosquitto/pwfile ; ${SUDO:-sudo} chmod 640 /etc/mosquitto/pwfile
-        ${SUDO:-sudo} mosquitto_passwd -b /etc/mosquitto/pwfile "${MQTT_USER/:*/}" "${MQTT_USER/*:/}"
+        ${SUDO:-sudo} mosquitto_passwd -b /etc/mosquitto/pwfile "${SERVICES[mosquitto,USER]/:*/}" "${SERVICES[mosquitto,USER]/*:/}"
     else
         MESSAGE NOTICE "For security:\n    add USER to mosquitto: sudo mosquitto_passwd -c /etc/mosquitto/pwfile USER"
         MESSAGE NOTICE "You may need to change the mosquitto conf file in /etc/mosquitto/conf.d."
     fi
     local ANONIMOUS=true
-    if echo "${MQTT_CLIENT}" | grep -q ':' && [ -z "${MQTT_CLIENT/*:/}" ] # false if password is defined?
+    if echo "${SERVICES[mosquitto,CLIENT]}" | grep -q ':' && [ -z "${SERVICES[mosquitto,CLIENT]/*:/}" ] # false if password is defined?
     then 
         if read -p "Run MQTT with client permissions anonimous? Yes|no: " -t 30 ANONIMOUS
         then
@@ -1808,10 +1842,10 @@ function INSTALL_MOSQUITTO() {
     # One may need to add bridge modus in the config file.
     # Or mqtt filter service in the config file!
     MESSAGE INFO "MQTT client access anonimous is '$ANONIMOUS'."
-    MESSAGE NOTICE "Configuring MQTT file for HAS: ${MQTT_CONF}."
-    ${SUDU:-sudo} touch ${MQTT_CONF}
+    MESSAGE NOTICE "Configuring MQTT file for HAS: ${SERVICES[mosquitto,CONF]}."
+    ${SUDU:-sudo} touch ${SERVICES[mosquitto,CONF]}
     echo "# needed for home assistant, disable/enable allow_anonimous
-${MQTT_USER/[a-zA-Z]*/user ${MQTT_USER/:*/}}
+${SERVICES[mosquitto,USER]/[a-zA-Z]*/user ${SERVICES[mosquitto,USER]/:*/}}
 #persistence_file mosquitto.db
 #persistence_location
 #log_dest stderr
@@ -1823,25 +1857,95 @@ ${MQTT_USER/[a-zA-Z]*/user ${MQTT_USER/:*/}}
 #restart_timeout 5 30
 #try_private true
 pid_file /run/mosquitto/mosquitto.pid
-listener ${MQTT_PORT:-1883} ${MQTT_BRIDGE}
+listener ${SERVICES[mosquitto,PORT]:-1883} ${SERVICES[mosquitto,BRIDGE]}
 #persistence true
 #persistence_location /var/lib/mosquitto/
 log_dest file /var/log/mosquitto/mosquitto.log
 allow_anonymous $ANONIMOUS
-" | ${SUDO:-sudo} sed -e "w ${MQTT_CONF}" -e d
+" | ${SUDO:-sudo} sed -e "w ${SERVICES[mosquitto,CONF]}" -e d
     ${SUDO:-sudo} sed -i -e 's/^persistence/# persistence/' -e 's/^user/# user/' -e 's/^log_dest/# log_dest/' /etc/mosquitto/mosquitto.conf
     
     if ! ${SUDO:-sudo} systemctl --quiet restart mosquitto >/dev/null
     then
-         MESSAGE ALERT "Failed to restart mosquitto service.\nCheck journal and logging: e.g. run 'mosquitto -v -c /etc/mosquitto/mosquiito.conf'"
+         MESSAGE ALERT "Failed to restart mosquitto service.\nCheck journal and logging: e.g. run 'mosquitto -v -c /etc/mosquitto/mosquitto.conf'"
          return 1
     fi
-    if ! mosquitto_pub --host ${HOSTIP} -t test -m OK --quiet
+
+    if $ANONIMOUS && TEST_MOSQUITTO            # check if anonimous messages are accepted
     then
-         MESSAGE ALERT "Mosquitto service is not accepting anonymous messages.\n Check logging mosquitto."
+        LOGGER NOTICE "Mosquitto service is configured anominous messages."
     else
-	 LOGGER NOTICE "Service mosquitto started."
+	LOGGER NOTICE "Mosquitto is configured and is not accepting anonimous messages."
     fi
+    return 0
+}
+
+# install autofs e.g. docker containers local backup NAS archive via smb
+# SMB=//lunar/HAS.161
+# CRED=homeassistant,klote2HAS
+# /etc/auto.master add: /- /etc/autofs.SMB.shares --timeout 15 browse
+# using samba smb conventional authorisation. Alternative is Kerberos.
+# /etc/autofs.SMB.shares: ${BACKUP_DIR} -fstype=cifs,rw,username=${CRED/,*/},password=${CRED/*,/},dir_mode=0750,file_mode=0640 :$SMB
+# /etc/autofs.SMB.shares: ${BACKUP_DIR} -fstype=cifs,rw,credentials=/etc/autofs.SMB.credentials,dir_mode=0750,file_mode=0640 :$NAS_SMB
+function CONFIG_AUTOFS() {
+    if ! [ -d /etc/auto.master ] && \
+	    [ -z "${SERVICES[autofs,SHARE]}" ] && [ -z "${SERVICES[autofs,CLIENT]}" ]
+    then
+	MESSAGE ERR "Service 'autofs' does not exists or no SMB share or credentials defined. Skip configuration."
+	return 1
+    fi
+    ${SUDO:-sudo} mkdir -p ${BACKUP_DIR}         # using container backup dir as share
+    if [ -s /etc/autofs${SERVICES[autofs,SHARE]//\//.}.shares ]  || [ -s /etc/autofs${SERVICES[autofs,SHARE]//\//.}.credentials ]
+    then
+	MESSAGE NOTICE "Will overwrite /etc/autofs${SERVICES[autofs,SHARE]//\//.}.{shares,credentials}."
+    fi
+    MESSAGE INFO "Changing service 'autofs' configuration SMB files: /etc/autofs${SERVICES[autofs,SHARE]//\//.}.{shares,credentials}."
+    # add SAMBA smb NAS file sharing (docker container local archives
+    (cat /etc/auto.master ; echo "
+# Docker containers remote NAS share. Added $(date '+%Y-%m-%d')
+/- /etc/autofs${SERVICES[autofs,SHARE]//\//.}.shares --timeout 15 browse
+" ) | \
+    ${SUDO:-sudo} sed -e "w /etc/auto.master" -e d
+    # create/overwrite smb share configuration for BACKUP_DIR
+    echo "${BACKUP_DIR} -fstype=cifs,rw,credentials=/etc/autofs${SERVICES[autofs,SHARE]//\//.}.credentials,dir_mode=0750,file_mode=0640 :${SERVICES[autofs,SHARE]//\//.}" | \
+        ${SUDO:-sudo} sed -e "w /etc/autofs${SERVICES[autofs,SHARE]//\//.}.shares" -e d
+    # define smb credentials file
+    echo -e "username=${SERVICES[autofs,CLIENT]/:*/}\npassword=${SERVICES[autofs,CLIENT]/*:/}" | \
+        ${SUDO:-sudo} sed -e "w /etc/autofs${SERVICES[autofs,SHARE]//\//.}.credentials" -e d
+    ${SUDO:-sudo} chmod 600 /etc/autofs${SERVICES[autofs,SHARE]//\//.}.credentials
+
+    ${SUDO:-sudo} systemctl restart autofs
+
+    # test if smb archive can be accessed we need smbclient samba application
+    if ! which smbclient >/dev/null ; then APT::install smbclients ; fi
+    MESSAGE NOTICE "Test 'autofs' for SMB shared archives."
+    if ! touch ${BACKUP_DIR}/testSMB || \
+       ! smb-client --user=${SERVICES[autofs,CLIENT]/:*/}%${SERVICES[autofs,CLIENT]/*:/} --command='rm testSMB' ${SERVICES[autofs,SHARE]} 
+    then
+	MESSAGE ERR "Service 'autofs' failed on using NAS archive via ${BACKUP_DIR} and ${SERVICES[autofs,SHARE]}."
+	return 1
+    fi
+    return 0
+}
+
+# install an OS system service
+function INSTALL_SERVICE() {
+    local SRVR=${1}
+    if [ -n "${SERVICES[$SRVR,PORT]}" ] && LISTENING ${SERVICES[$SRVR,PORT]} REMOTE
+    then
+         MESSAGE WARNING "There is already an $SRVR service running on port ${SERVICES[$SRVR,PORT]:-1883}. Skipping installation."
+    else # install service via apt
+	 ! APT::install $SRVR && return 1
+    fi
+
+    if ! CONFIG_${SRVR^^}                       # configuring mosquitto credentials, etc.
+    then
+	MESSAGE ERR "Failed to configure $SRVR, check manually /etc/$SRVR config files."
+	return 1
+    fi
+    ${SUDO:-sudo} systemctl --quiet enable $SRVR 2>/dev/null  # start on (re)boot
+
+    LOGGER NOTICE "Service $SRVR is OK."
     return 0
 }
 
@@ -1888,13 +1992,11 @@ function CHECK_FREESPACE() {
 # add debian standard service (these are not docker containers)
 function ADD_SERVICE(){
     local SRVR=${1} STATUS
-    if [ "$SRVR" = upgrade ]
-    then                                 # (full} upgrade OS system
-	MESSAGE STATE "Checking OS system for updates"
-	UPDATE_SYSTEM
-	return $?
-    fi
-    systemctl --quiet is-active ${SRVR}  # check if service deamon is running
+    UPDATE_SYSTEM                                    # update check and eventually upgrade OS
+    STATUS=$?
+    [ "$SRVR" = upgrade ] && return $STATUS          # upgrade is not an active OS service deamon
+
+    systemctl --quiet is-active ${SRVR}              # check if service deamon is running
     STATUS=$?
     case ${STATUS} in
     0)
@@ -1902,39 +2004,37 @@ function ADD_SERVICE(){
 	  LOGGER OK "System service '${SRVR}' is servicing"
           return 0
     ;;
-    1)    MESSAGE CRIT "Service '$SRVR' deamon is not running. Restart manually."
+    1)    MESSAGE ERR "Service '$SRVR' deamon is not running. Restart manually."
+	  return 1
     ;;
     2|3)  MESSAGE NOTICE "Service '$SRVR' deamon is installed but not running. Restarting service."
 	  ${SUDO:-sudo} systemctl  restart ${SRVR} ; sleep 2
 	  if systemctl --quiet is-active ${SRVR}
 	  then
-	      LOGGER OK "System service '${SRVR}' is servicing"
+	      if systemctl --quiet enable ${SRVR}
+	      then
+		  LOGGER OK "System service '${SRVR}' is servicing and enabled on reboot"
+	      else
+	          LOGGER OK "System service '${SRVR}' is servicing"
+	      fi
 	      return 0
+	  else
+	      MESSAGE ERR "Failed to restart system service '$SRVR'. Check the service configuration."
+	      return 1
 	  fi 
     ;;
-    *)    MESSAGE INFO "Installing and starting $SRVR deamon."
+    4|*)    MESSAGE INFO "Installing and starting $SRVR service deamon."
     ;;
     esac
 
     MESSAGE STATE "Installing OS service ${SRVR}"
     STATUS=1
-    case $SRVR in
-    docker)
-        INSTALL_DOCKER
-        STATUS=$?
-    ;;
-    mosquitto)
-        INSTALL_MOSQUITTO
-        STATUS=$?
-    ;;
-    esac
+    INSTALL_SERVICE $SRVR                            # install the deamon
+    STATUS=$?
     if (( $STATUS == 0 ))
     then
         INSTALLED[${SRVR}]="${Green}Installed${Reset} system service ${Italic}$SRVR${Reset}."
-	if [ ${SRVR} = mosquitto ]
-	then
-	    INSTALLED[${SRVR}]+=" Port ${Italic}$MQTT_PORT${Reset}."
-	fi
+	[ -n "${SERVICES[$SRVR,PORT]}" ] && INSTALLED[${SRVR}]+=" Port ${Italic}${SERVICES[$SRVR,PORT]}${Reset}."
     else
         MESSAGE SKIPPED "Failed to install system service '${Red}$SRVR${Reset}'. Skipped."
 	INSTALLED[${SRVR}]="${Red}Failed${Reset} to install container ${Italic}$SRVR${Reset}."
@@ -1945,7 +2045,7 @@ function ADD_SERVICE(){
 # import (pull) Home Assistant docker container image. Arg: container name.
 function GET_IMAGE(){
     local IMG=0
-    declare -i CNT=0 RTS=0
+    declare -i CNT=0 rts=0
     if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi  # enouph disk space?
     MESSAGE INFO "Check and get latest container '${1}' image '${DOCKERS[${1},IMAGE]}'.\nThis takes some while..."
     # some container repros fail first time, but are succefull second trial. E.g. go2rtc pull image.
@@ -1981,8 +2081,8 @@ function GET_IMAGE(){
         if ${SUDO}docker ps --format '{{.Names}}' | grep -q '${1}'  # is container running?
         then
             LOGGER NOTICE "Container image for '${1}' is up to date"
-            RTS=1        # still running fine
-	else RTS=2       # up to date, but not running
+            rts=1        # still running fine
+	else rts=2       # up to date, but not running
         fi
     fi
     rm -f ${TMP_DIR}/pull
@@ -2002,7 +2102,7 @@ function GET_IMAGE(){
 # local data backup directory. optional: args container ...
 function ARCHIVE(){
     local BDIR CNTR
-    declare -i RTS=0
+    declare -i rts=0
     if [ -z "$1" ]      # backing up all installed containers
     then
 	BDIR=$(echo ${!DOCKERS[@]} | sed 's/,[A-Z][A-Z]*//g' | \
@@ -2012,12 +2112,12 @@ function ARCHIVE(){
 	    if [ -d "${DOCKERS[$CNTR,HOME]}" ]      # installed container dir
 	    then
 		ARCHIVE $CNTR
-		RTS+=$?
+		rts+=$?
             else
 		continue
 	    fi
 	done
-	return $RTS
+	return $rts
     fi
     #  may need to encrypt backup data
     for CNTR in $@
@@ -2050,11 +2150,11 @@ function ARCHIVE(){
 	# ${SUDO}docker ${CNTR} stop ; ${SUDO}docker ${CNTR} wait
 	${SUDO}docker ${CNTR} pause   # better to stop and missing events? 
         ${SUDO:-sudo} tar --directory=${DOCKERS[${CNTR},HOME]} -czf "$FBACKUP" .
-	RTS+=$?
+	rts+=$?
 	# ${SUDO}docker ${CNTR} start
 	${SUDO}docker ${CNTR} unpause
     done
-    return $RTS
+    return $rts
 }
 
 # stop running container. ARG: container name
@@ -2134,29 +2234,29 @@ function ZIGBEE2MQTT_MQTT(){
     do
         case "$ITEM" in
           server)
-            if ! LISTENING ${MQTT_PORT:-1883} ${MQTT_HOST:-localhost}
+            if ! LISTENING ${SERVICES[mosquitto,PORT]:-1883} ${SERVICES[mosquitto,HOST]:-localhost}
             then
 	        MESSAGE NOTICE "No running MQTT service (mosquitto?), detected.\nService is needed for zigbee2mqtt or configure a remote one."
                 return 1
 	    fi
-	    echo "  server: mqtt://${MQTT_HOST:-localhost}:${MQTT_PORT:-1883}"
-            MESSAGE INFO "Using MQTT service: mqtt://${MQTT_HOST:-localhost}:${MQTT_PORT:-1883}."
+	    echo "  server: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${SERVICES[mosquitto,PORT]:-1883}"
+            MESSAGE INFO "Using MQTT service: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${SERVICES[mosquitto,PORT]:-1883}."
           ;;
           user)
-            if [ -n "${MQTT_CLIENT/:*/}" ]
+            if [ -n "${SERVICES[mosquitto,CLIENT]/:*/}" ]
             then
-                echo "  user: ${MQTT_CLIENT/:*/} "
-                MESSAGE INFO "Zigbee2mqtt MQTT user authorized: ${MQTT_CLIENT/:*/}."
+                echo "  user: ${SERVICES[mosquitto,CLIENT]/:*/} "
+                MESSAGE INFO "Zigbee2mqtt MQTT user authorized: ${SERVICES[mosquitto,CLIENT]/:*/}."
             else
 	        echo "  # user: anonimous"
                 MESSAGE WARNING "Zigbee2mqtt MQTT user authorisation anonymous."
 	    fi
 	    ;;
           password)
-            if echo "${MQTT_CLIENT}" | grep -q ':' && [ -n "${MQTT_CLIENT/*:/}" ]
+            if echo "${SERVICES[mosquitto,CLIENT]}" | grep -q ':' && [ -n "${SERVICES[mosquitto,CLIENT]/*:/}" ]
             then
-               echo "  password: ${MQTT_CLIENT/:*/}"
-               MESSAGE DEBUG "Zigbee2mqtt MQTT authorisation pwd ${MQTT_CLIENT/*:/}."
+               echo "  password: ${SERVICES[mosquitto,CLIENT]/:*/}"
+               MESSAGE DEBUG "Zigbee2mqtt MQTT authorisation pwd ${SERVICES[mosquitto,CLIENT]/*:/}."
 	    else
 	       echo "  # password: acacadabra"
                MESSAGE WARNING "Zigbee2mqtt MQTT authorisation pwd: anonymous!"
@@ -2170,7 +2270,7 @@ function ZIGBEE2MQTT_MQTT(){
 # add environment variable settings to env run CLI command
 # DEPRECIATED
 function ENV_ZIGBEE2MQTT_CONFIG() {
-    local CONFIGS ITEM RTS=0
+    local CONFIGS ITEM
     CONFIGS+="AVAILABILITY_ENABLED=true"   # sets availability of a device
     CONFIGS+=$( ZIGBEE2MQTT_MQTT )         # sets MQTT access
     CONFIGS+=$( ZIGBEE2MQTT_DEVICE )       # sets Zigbee dongle device
@@ -2178,7 +2278,7 @@ function ENV_ZIGBEE2MQTT_CONFIG() {
     then
         CONFIGS+="ADVANCED_LOG_LEVEL=debug "
     fi
-    for VAR in ${CONFIGS}
+    for ITEM in ${CONFIGS}
     do
        if [ -z "$ITEM" ] || ! [ -n "${ITEM/*_*=*/}" ] ; then continue ; fi
        DOCKERS[zigbee2mqtt,ENV]+="
@@ -2329,7 +2429,7 @@ advanced:
 # get device for a container. Try automatic detect for serial dongle
 # arg1: container name, arg2: empty or HELP information only called from CLI help argument
 function GET_DONGLE(){
-     local DONGLE RTS=0 INF=$2
+     local DONGLE rts=0 INF=$2
      case "${1}" in
          zigbee2mqtt)
              if ! [ -d /dev/serial/by-id/ ]
@@ -2352,7 +2452,7 @@ function GET_DONGLE(){
              then
                  MESSAGE ${INF:-WARNING} "Device ${DONGLE} does not exists! Using /dev/ttyACM0"
                  echo "--device=/dev/ttyACM0:/dev/ttyACM0"
-                 RTS=1
+                 rts=1
              else
                  echo "--device=${DONGLE}:/dev/ttyACM0" # map real dongle to ACM0
              fi
@@ -2364,7 +2464,7 @@ function GET_DONGLE(){
 	     fi
 	 ;;
      esac
-     return $RTS
+     return $rts
 }
 
 # Container may have a prepaired and updated own configuration startup file
@@ -2457,14 +2557,16 @@ function ADD_CONTAINER(){
     declare -i STATUS=0
     case ${CNTR} in
     mqtt5)
-        if pgrep mosquitto >/dev/null && LISTENING ${MQTT_PORT:-1883} 
+        if pgrep mosquitto >/dev/null && LISTENING ${SERVICES[mosquitto,PORT]:-1883} 
         then
-            MESSAGE WARNING "MQTT 'mosquitto' service is already active on port ${MQTT_PORT:-1883}."
-	    LOGGER ERR "'${CNTR}' port ${MQTT_PORT:-1883} busy"
+            MESSAGE WARNING "MQTT 'mosquitto' service is already active on port ${SERVICES[mosquitto,PORT]:-1883}."
+	    LOGGER ERR "'${CNTR}' port ${SERVICES[mosquitto,PORT]:-1883} busy"
             return 1
         fi
     ;;
     esac
+    UPDATE_SYSTEM                                        # make sure OS system is up to date
+
     # check if image is installed. If not install/pull it from repository 
     GET_IMAGE "${CNTR}"
     case $? in
@@ -2776,11 +2878,13 @@ function PURGE_APP(){
 
 # check if dependant container or service is available, if not add them
 function ADD_ITEM() {
-   local RTS=1 ITEM=${1,,} TYPE
+   local rts=1 ITEM=${1,,} TYPE
    if [ -n "$2" ] ; then TYPE=" (e.g. $2 depends on it)" ; fi
    if echo ${CONTAINERS} ${DEAMONS} | grep -q "^${ITEM}$" ; then return 0 ; fi  # already added
    # is it a supported docker container?
-   if echo ${!DOCKERS[@]} | awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort | uniq | grep -q "^${ITEM}$"
+   if echo ${!DOCKERS[@]} | \
+	   awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort | uniq | \
+	   grep -q "^${ITEM}$"
    then
        if ! systemctl --quiet is-active docker         # docker installed and running?
        then
@@ -2801,12 +2905,14 @@ function ADD_ITEM() {
            MESSAGE INFO "Adding for docker: container '${ITEM}'${TYPE}."
            CONTAINERS+="
 ${ITEM}"
-           CHK_DEPENDANT "${ITEM}"
+           ADD_DEPENDANT "${ITEM}"
        fi
-       RTS=
+       rts=
    fi
    # is it a supported system service?
-   if echo ${!SERVICES[@]} | awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort | uniq | grep -q "^${ITEM}$"
+   if echo ${!SERVICES[@]} | \
+	   awk '{for(i=1;i <= NF;i++){sub(",[A-Z]*","",$i); print $i;}}' | sort | uniq | \
+	   grep -q "^${ITEM}$"
    then
        if systemctl --quiet is-active ${ITEM}
        then
@@ -2821,11 +2927,11 @@ ${ITEM}"
 	   else DEAMONS+="
                    ${ITEM}"
            fi
-           CHK_DEPENDANT "${ITEM}"
+           ADD_DEPENDANT "${ITEM}"
        fi
-       RTS=
+       rts=
    fi
-   if [ -n "$RTS" ]
+   if [ -n "$rts" ]
    then
        MESSAGE WARNING "Container or system service '$1' is not configured. Skipped."
        return 1
@@ -2881,10 +2987,10 @@ function ADD_CNTRaddons() {
     return $?
 }
 
-# add containers or services on which the argument depends
-function CHK_DEPENDANT() {
+# add containers or services of which the install (ARG) depends
+function ADD_DEPENDANT() {
     local CHK
-    for CHK in ${DOCKERS[$1,DPTS]} ${SERVICES[$1,DPTS]}
+    for CHK in ${DOCKERS[$1,DEP]} ${SERVICES[$1,DEP]}
     do
         ADD_ITEM "$CHK" ${1,,}
     done
@@ -2927,7 +3033,8 @@ do                                              # handle options
         break
     fi
 done
-echo -e "Bash script ${SCRIPT} is using log level: ${Blue}${MSG^^}${Reset}." >${VERBOSE}
+! [ ${MSG^^} = 'NOTICE' ] && \
+	echo -e "Bash script ${SCRIPT} is using log level: ${Blue}${MSG^^}${Reset}." >${VERBOSE}
 
 # collect list of containers and services to manipulate
 
@@ -2950,7 +3057,7 @@ do                                             # maintenance actions
         ;;
         dump|archive)          # create a tar archive of local container data
 	    shift
-	    if [ "${1,,}" = all ] ; then T=$(ls ${DOCKERSDIR}/ 2>/dev/null) ; else T="$@" ; fi
+	    if [ "${1,,}" = all ] ; then T=$(ls ${DOCKERDIR}/ 2>/dev/null) ; else T="$@" ; fi
 	    for F in ${T}
             do
                 if [ -n "${F}" ]
@@ -2969,7 +3076,7 @@ do                                             # maintenance actions
 	;;
         restore)                                # restore local container data
 	    shift
-	    if [ "${1,,}" = all ] ; then T=$(ls ${DOCKERSDIR}/ 2>/dev/null) ; else T=$@ ; fi
+	    if [ "${1,,}" = all ] ; then T=$(ls ${DOCKERDIR}/ 2>/dev/null) ; else T=$@ ; fi
 	    GET_ARCHIVED
 	    for F in ${T}
 	    do
@@ -2979,8 +3086,8 @@ do                                             # maintenance actions
 		     then
 			 MESSAGE ERR "Unable to find backup data file or not supported container ${F}. Skipped."
 		     else                       # and install/update container
-			 ADD_ITEM ${F}
-			 MESSAGE OK "Restored local data for containet $F"
+			 #ADD_ITEM ${F}         # TO DO: need to review this statement !
+			 MESSAGE OK "Restored local data for container $F"
 		     fi
 		fi
 	    done
@@ -3010,9 +3117,6 @@ done
 # and now install or update the docker containers
 [ -z "${DEAMONS}" ] && [ -z "${CONTAINERS}" ] && exit 0
 declare -i RTS=0
-
-# keep system up to date
-ADD_ITEM upgrade                                 # default check OS for updates
 
 BAR::INIT ; echo >$VERBOSE                       # set virtual window and clear display
 
