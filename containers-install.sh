@@ -26,9 +26,10 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 4.13 $ $Date: 2026/10/14 15:54:04 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 4.15 $ $Date: 2026/10/21 15:49:30 $' | awk '{ printf("V%s_%s", $2,$5);}')
 #if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then echo "BASH DEBUG MODE" 1>&2 ; fi
 SCRIPT=$(basename $0)
+export LANG=en_GB.UTF-8              # require GB language messages
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
 HOSTIP=""                            # server ip address for container webUI access
@@ -128,7 +129,7 @@ if XTERM ; then                       # text coloring van be used
     Italic="\e[3m"                    # Italic
     Under="$(tput smul)"              # Underlined
     Bold="$(tput bold)"               # bold
-    Unbold="\033[22m"                 # bold off
+    Unbold="\033[0m"                  # bold off
     Black="${Bold}$(tput setaf 16)"   # Black
     Red="${Bold}$(tput setaf 196)"    # Red
     Green="${Bold}$(tput setaf 22)"   # Green
@@ -141,6 +142,8 @@ if XTERM ; then                       # text coloring van be used
     RedWhite="$(tput setab 196)${Bold}${White}" # bold white on red
     # reset
     Reset="$(tput sgr0)"              # Text color reset
+    El="\033[K"                       # clear to end of line
+    Cuu1="\033[A"                     # up one line
 fi
 
 # exit and interrupt handling
@@ -178,12 +181,12 @@ function CLEANUP() {
     CLEANUP::failure
   fi
   [ -n "$BARinit" ] && BAR::RESET          # should not happen
-  (( ${#INSTALLED[@]} > $RTS )) && MESSAGE OK "INSTALLED and UPDATED: $(( ${#INSTALLED[@]}-${RTS} ))"
+  (( ${#INSTALLED[@]} > 0 )) && MESSAGE OK "INSTALLED and UPDATED: $(( ${#INSTALLED[@]}-${RTS} ))"
   (( $RTS > 0 )) && MESSAGE ERROR "FAILED to install or update: $RTS))"
   if [ "$TMP_LOG" != /dev/null ] && [ -s "$TMP_LOG" ]
   then echo -e  "\n\nInstallation logging saved in ${Blue}$TMP_LOG${Reset}." >$VERBOSE
   fi
-  tput cup ${CURSOR/:*/} 0 ; tput cud1 ; tput ed
+  if [ -n "$(tty)" ] ; then tput cup ${CURSOR/:*/} 0 ; tput cud1 ; tput ed ; fi
 }
 # interrupt processing the script
 function INTERRUPTED() {
@@ -217,9 +220,10 @@ function MESSAGE() {
     if [ -z "$2" ] ; then L=ALL ; fi
     if [ -z "${LEVEL[$L]}" ]
     then                                   # state of script progress messages
+	[ -z "$(tty)" ] && return 0        # no tty: no global messages
         (( ${LEVEL[NOTICE]:-2} < ${LEVEL[$MSG]:-4} )) && return 0
         local COLOR
-	# BAR::printbar " "                  # clear window bottum line
+	# BAR::printbar " "                # clear window bottum line
         case "${1^^}" in
                 STATE|STATUS) COLOR="$(tput setab 123; tput setaf 0)${Bold}"
                 ;;
@@ -532,63 +536,69 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
 # install service or application via apt
 function APT::install() {
     local SRVR RTS=0 APTS
+    declare -i cnt=0
     for SRVR in $@
     do
 	if [ -n "${SERVICES[$SRVR,APP]}" ]
 	then
 	    for SRVR in ${SERVICES[$SRVR,APP]}
 	    do
-		! apt list --installed 2>/dev/null | grep -q "^$SRVR/" && APTS+="$SRVR "
+		! apt list --installed 2>/dev/null | grep -q "^$SRVR/" && APTS+="$SRVR " && cnt+=1
 	    done
 	else
-	    ! apt list --installed 2>/dev/null | grep -q "^$SRVR/" && APTS+="$SRVR "
+	    ! apt list --installed 2>/dev/null | grep -q "^$SRVR/" && APTS+="$SRVR " && cnt+=1
 	fi
     done
-    [ -z "$APTS" ] && return 0
-    UPDATE_SYSTEM
-    MESSAGE NOTICE "Install OS (${APTS// /, }) packages.\nCan take a while..."
-    BAR::START "$SRVR install" 75 OS
+    APTS="${APTS/% /}" ; [ -z "$APTS" ] && MESSAGE INFO "Nothing to install." && return 0
+    UPGRADABLE && UPDATE_SYSTEM              # upgrade OS system if needed
+    MESSAGE NOTICE "Installing OS (${APTS// /, }) packages.\nCan take a while..."
+    BAR::START "OS install" $(( ${cnt} * 60 )) OS
     for SRVR in $APTS
     do
       case "${SRVR}" in
         https://*|file://*)
-          MESSAGE INFO "Install ${SRVR} package via bash script."
+          MESSAGE INFO "Installing ${SRVR} OS package via bash script."
           # docker.com installs with bash file, debug with --dry-run
-          curl -sSL ${$SRVR} >${TMP_DIR}/install && \
+          curl -sSL ${SRVR} >${TMP_DIR}/install && \
               ${SUDO:-sudo} stdbuf -o L bash ${TMP_DIR}/install 2>&1 | \
-              tee -a $TMP_DIR/msg | grep -v '^+ sh -c'
+              tee -a $TMP_DIR/install | grep -v '^+ sh -c'
         ;;
         *)                                   # default just SRVR name is used
-          MESSAGE INFO "Install ${SRVR} OS package."
-          ! apt list --installed 2>/dev/null && \
-              ${SUDO:-sudo} stdbuf -oL apt-get install $SRVR -y -qq 2>&1 | \
-              APT::show log="${SRVR}" priority=NOTICE filter="APT::filter"
+          MESSAGE INFO "Installing ${SRVR} OS package via apt."
+          ${SUDO:-sudo} stdbuf -o0 apt-get install $SRVR -y -qq 2>&1 | \
+	      sed -e 's/^\r//' -e 's/\r$//' -e 's/\r/\n/g' | \
+              APT::show log=install priority=NOTICE filter="APT::filter"
         ;;
       esac
       if (( $? > 0 ))
       then
-         ERRORS msg                        # failure save errors messages
+         ERRORS install                      # failure save errors messages
          BAR::STOP
-         MESSAGE ALERT "Docker installation failed.\nSee logging ${TMP_DIR}."
+         MESSAGE ALERT "APT: installation ${SRVR} failed.\nSee logging ${TMP_DIR}."
          exit 1
       fi
+      MESSAGE NOTICE "Installed OS package ${SRVR}."
     done
     BAR::STOP # timing
-    rm -f ${TMP_DIR}/{msg,install}
+    rm -f ${TMP_DIR}/install
+    LOGGER NOTICE "Installed ${APTS// /, }."
 
     return $RTS
 }
 
 # filter function for apt upgrade logging. Support for LANGUAGE NL and UK/US
+# display a compacted log of actions from apt command
 function APT::filter() {
-   awk '
+   # awk on RPi shows std IO buffering problems, gawk is used instead
+   stdbuf -o0 gawk '
       BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 }
       /Get:[1-9]/||/Ophalen:[1-9]/||/afhandelen van triggers/||/Bezig met uitpakken/{ item = $0;
           sub("^.*Get:.*","Get",item); sub("^.*Ophalen:.*","Ophalen",item);
           sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
           sub("^Bezig met uitpakken.*","Uitpakken",item);
       }
-      /Get:[1-9]/||/^Unpacking/||/^Setting up/||/^Processing triggers/||/Ophalen:[1-9]/||/^Uitpakken/||/^Instellen/||/afhandelen van triggers/{
+      # /^Setting up/||/^Instellen/  not shown
+      /Get:[1-9]/||/^Unpacking/||/^Processing triggers/||/Ophalen:[1-9]/||/^Uitpakken/||/afhandelen van triggers/{
           if ( item == "" ) { item = $1; gsub(":","",item)}
           if( item == cur ) { printf("\r%s: %d", item, ++cnt)}
           else { cur = item; cnt = 0; printf("\n%s: %d", item, ++cnt)}
@@ -596,7 +606,11 @@ function APT::filter() {
       }
       /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
       /^Found:/ { printf("\n%s", $0);}
-      /^\(Database /{ prt = 0; printf("\n%s", $0);}
+      /^\(Database /||/^\(Reading database/||/^Extracting /{ prt = 0;
+          if ( db++ > 0 ) { system("tput cuu1");}; printf("\n%s", $0);
+      }
+      /^\(Database*\)/||/^\(Reading database*\)/{ printf("\n"); } # end of DB reading
+      /^Fetched / { printf("\n"); } # end of Extracting
       /^Adding boot/||/^[dD]one/ {  printf("\n"); prt += 1; next;}
       /^Running module/||/^  *- .*riginal module/||/^ - Installation/||/^depmod\.\./||/^$/{ next ; }
       { if( prt ) { print; } ; fflush(); }
@@ -638,51 +652,62 @@ function APT::show() {
 
 # check if system needs to be updated. Update if last update was older as a week ago
 UPGRADE_CNT=                                      # nr of upgradable packages. Dlft: undefined
-function CNT_UPGRADABLE() {
-   [ -n "$UPGRADE_CNT" ] && return $UPGRADE_CNT   # check only once in the script
-   MESSAGE STATE "Checking OS system for updates"
-   # check if there are upgradeable packages
-   ${SUDU:-sudo} apt update -qq 2>/dev/null >/dev/null
-   UPGRADE_CNT=$(${SUDU:-sudo} apt list --upgradable 2>/dev/null | grep --count '/')
-   if (( $UPGRADE_CNT == 0 ))
+function UPGRADABLE() {
+   local cnt=0
+   [ -n "${2}" ] && UPGRADE_CNT=""                # reset count
+   if [ -z "$UPGRADE_CNT" ]
    then
-        MESSAGE INFO "OS system is up to date."
+       MESSAGE STATE "Checking OS system for updates"
+       BAR::START "updates?" 15
+       # check if there are upgradeable packages
+       ${SUDU:-sudo} apt update -qq 2>/dev/null >/dev/null
+       #UPGRADE_CNT=$(${SUDU:-sudo} apt list --upgradable 2>/dev/null | grep --count '/') # incl kept
+       UPGRADE_CNT=$(apt-get full-upgrade --yes --no-act --quiet 2>/dev/null | \
+	       grep 'upgraded, ' | \
+	       sed -e 's/[0-9][0-9]*/:&/g' -e 's/[^0-9:]//g' -e '/^ *$/d' -e 's/^://')
+       [ -z "${UPGRADE_CNT}" ] && UPGRADE_CNT=0:0:0:0
+       BAR::STOP
    fi
-   return $UPGRADE_CNT
+   printf -v ${1:-fake} "%s" ${UPGRADE_CNT}
+   if (( ${UPGRADE_CNT/:*/} == 0 ))
+   then
+	return 1
+   fi
+   return 0
 }
 
-# upgrade the OS system
+# upgrade the OS system CLI language: gb_GB.UTF-8
 function UPDATE_SYSTEM() {
    declare -i RTS=0 CNT=0 ; local delay
+   # APT::filter on RPi awk has std io buffer bug, so gawk is installed
+   ! which gawk >/dev/null && APT::install gawk
    #
    # full-upgrade: basic plus hold packages incl removal
    function UPGRADE() {                           # arg1: type (upgrade or full-upgrade
        # returns 1 on failure                     # arg2: nr onhold
-       local type ans=no delay
-       declare -i nr=0  onhold=0 mysecs=0         # timing=0
-       printf -v "${2:-fake}" "0:0"               # none
+       local type ans=no delay nr=0:0:0:0
+       declare -i onhold=0 mysecs=0         # timing=0
        type=${1,,} ; sudo true                    # sudo cache update
+
+       # nr: #upgraded:#installed:#removable:#kept back
        case ${1,,} in
        full-upgrade)
-	   CNT_UPGRADABLE ; nr=$? ; mysecs=$(( ($nr*7)*155/100 ))
+	   UPGRADABLE nr reset ; mysecs=$(( (${nr/:*/}*7)*155/100 ))
            ;;
        upgrade)
-	   CNT_UPGRADABLE ; nr=$? ; mysecs=$(( ($nr)*220/100 ))
+	   UPGRADABLE nr ; mysecs=$(( (${nr/:*/})*220/100 ))
            ;;
        autoremove)
-	   # auto remove returns #upgraded, #installed, #removable, #upgradeable
-	   nr=$(${SUDU:-sudo} apt-get autoremove --no-act --quiet 2>/dev/null | \
-	      sed -e '/^[ A-Za-z]/d' -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | \
-	      cut -d ';' -f 3)
-	   mysecs=$(( ($nr)*115/100 ))
+	   UPGRADABLE nr
+	   mysecs=${nr/#[+(0-9)]:[+(0-9)]:/} ; mysecs=$(( (${mysecs/:*/})*115/100 ))
            ;;
        *) return 1                                 # type not supported
            ;;
        esac
-       printf -v "${2:-fake}" "%d:0" $nr
-       (( ${nr} <= 0 )) && return 0                # nothing to do
+       printf -v "${2:-fake}" "%s" $nr
+       (( ${mysecs} <= 0 )) && MESSAGE NOTICE "OS system is up to date." && return 0 # up to date
 
-       MESSAGE NOTICE "Trying to ${type/full-/fully} ${nr} OS system packages."
+       MESSAGE NOTICE "Trying to ${type/full-/fully } ${nr/:*/} OS system packages."
        local tuned
        BAR::secs $mysecs tuned
        delay="$(( $tuned/60 )) minutes $(( ${tuned}%60 )) seconds,"
@@ -697,80 +722,76 @@ function UPDATE_SYSTEM() {
        then
 	   read -p "Hit ${Blue}enter key${Reset} within 10 seconds to ${Blue}${Under}skip the OS ${type^^}${Reset}." -t "${T:-10}" ans
            (( $? > 0 )) && ans=no
-	   echo "$(tput cuu 1; tput el)" >$VERBOSE
+	   echo -e -n "$(tput cuu 1; tput el)" >$VERBOSE
        else ans=no
        fi
-       if [ "$ans" = no ]                          # do not skip upgrade
-       then
-	   case "${type}" in
-	       full-upgrade)
-	       BAR::START "OS ${type^^}:" ${mysecs}
-               ${SUDO:-sudo} stdbuf -oL apt-get --yes --quiet ${type,,} 2>/dev/null | \
-		   APT::show log=OSupgrade priority=NOTICE filter="APT::filter"
-	       ;;
-	       upgrade)
-	       BAR::START "OS ${type^^}:" ${mysecs}
-               ${SUDO:-sudo} stdbuf -o L apt-get --yes --quiet ${type,,} 2>/dev/null | \
-	           APT::show log=OSupgrade priority=NOTICE filter="APT::filter"
-	       ;;
-	       autoremove)
-	       BAR::START "OS ${type^^}:" ${mysecs}
-               stdbuf -oL ${SUDO:-sudo} apt autoremove --assume-yes --quiet 2>/dev/null | \
-		   APT::show log=OSupgrade priority=NOTICE
-	       ;;
-           esac
-	   (( $? > 0 )) && rts=1                   # errors
-           BAR::STOP # timing
-	   (( rts == 1 )) && ERRORS OSupgrade && return 1
-	   #(( ${timing:-0} > $mysecs )) && \
-           #    MESSAGE INFO "Increase OS system upgrading algorithm."
-       fi
-       local fld=4 rest=0
-       fld=4 ; [ "${type}" = autoremove ] && fld=3
-       rest=$(${SUDU:-sudo} apt-get autoremove --no-act --assume-yes --quiet 2>/dev/null | sed -e 's/[0-9][0-9]*/;&/g' -e 's/[^0-9;]//g' -e '/^ *$/d' -e 's/^;//' | cut -d ';' -f ${fld})
-       printf -v "${2:-fake}" "%d:%d" $nr $rest    # TO DO: some packages will be in the wait queue!
+       if [ "$ans" != no ] ; then return 0 ; fi   # do no take action
+
+       case "${type}" in
+	 upgrade|full-upgrade)
+	   BAR::START "OS ${type^^}:" ${mysecs}
+           ${SUDO:-sudo} stdbuf -o0 apt-get --yes --quiet ${type,,} 2>/dev/null | \
+	       sed -e 's/^\r//' -e 's/\r$//' -e 's/\r/\n/g' | \
+	       APT::show log=OSupgrade priority=NOTICE filter="APT::filter"
+	 ;;
+	 autoremove)
+	   BAR::START "OS ${type^^}:" ${mysecs}
+           stdbuf -oL ${SUDO:-sudo} apt autoremove --assume-yes --quiet 2>/dev/null | \
+	       APT::show log=OSupgrade priority=NOTICE
+	 ;;
+       esac
+       (( $? > 0 )) && rts=1                   # errors
+       BAR::STOP # timing
+       (( rts == 1 )) && ERRORS OSupgrade && return 1
+       #(( ${timing:-0} > $mysecs )) && \
+       #    MESSAGE INFO "Increase OS system upgrading algorithm."
+
+       nr=$(${SUDU:-sudo} apt-get autoremove --no-act --assume-yes --quiet 2>/dev/null | \
+	       grep 'upgraded, ' | \
+	       sed -e 's/[0-9][0-9]*/:&/g' -e 's/[^0-9:]//g' -e '/^ *$/d' -e 's/^://' )
+       printf -v "${2:-fake}" "%s" $nr             # upgraded:installed:remove:kept back
        return 0
    }
 
-   CNT_UPGRADABLE && return 0
+   local todo rts=0 notice="OS system packages are up to date."
+   ! UPGRADABLE todo && return 0                   # if nothing to upgrade return
    MESSAGE STATE "Upgrading OS system packages"
    # try a basic OS packages update
-   local todo rts=0
    if UPGRADE upgrade todo                         # upgrade basic packages
    then
-       local pkgs=${todo/:*/}
-       if (( ${todo/*:/} > 0 ))
+       if (( ${todo/*:/} > 0 ))                    # pkgs kept back
        then
-           INSTALLED[OSsystem]="OS system is upgraded. ${todo/*:/} packages are upgradeable."
+	   notice="OS system packages: ${todo/:*/} updated, $(echo ${todo} | cut -d ':' -f 2) installed. ${todo/*:/} packages are kept back."
 	   if UPGRADE full-upgrade todo
            then
-               INSTALLED[OSsystem]="OS system is fully upgraded. ${todo/*:/} packages are upgradeable."
+	       notices="OS system package ${todo/:*/} updated, $(echo ${todo} | cut -d ':' -f 2) installed. ${todo/*:/} packages are kept back."
 	   else
 	       rts=1
 	   fi
        fi
-       (( ${todo/:*/} > 0 )) && pkgs+=" (${todo/:*/} OS)"
-       if UPGRADE autoremove todo
+
+       local kept=$(echo "${todo}" | cut -d ':' -f 3 )   # any package to be removed
+       if (( "${kept:-0}" > 0 ))
        then
-	   if echo "${rts/0/$pkgs} $(( ${todo/:*/}-${todo/*:/} ))" | grep -q '[1-9]'
-	   then
-	       INSTALLED[OSsystem]="${Green}Installed${Reset} ${rts/0/Upgraded ${Bold}$pkgs packages${Reset}. }"
-	       (( (${todo/:*/} - ${todo/*:/}) > 0 )) && \
-		 INSTALLED[OSsystem]+=" Removed $(( ${todo/:*/}-${todo/*:/} )) deprecated packages."
-	   fi
-       else
-           rts=1
+	   if UPGRADE autoremove
+	   then notices+=" Removed ${kept} packages." 
+           else rts=1 ; fi                          # autoremove command failed
        fi
+
    else
-       ERRORS OSupgrade && MESSAGE SKIPPED "OS system upgrade not completed."
-       rts=1
+       rts=1                                        # upgrade command failed
    fi
-   if (( ${rts} == 0 ))
-   then MESSAGE OK "Updated the OS system."
-   else ERRORS OSupgrade && MESSAGE SKIPPED "OS system full upgrade not completed."
+   if (( ${rts} != 0 ))
+   then
+       notices="OS system packages upgrade is not completed."
+       ERRORS OSupgrade && MESSAGE SKIPPED ${notices:-Upgrade not completed}
    fi
-   rm -f ${TMP_DIR}/OSupgrade
-   UPGRADE_CNT=0                                  # upgraded as far as possible. Do not try again.
+   if [ -n "$notices" ]
+   then
+        MESSAGE NOTICE "${notices}" ; LOGGER NOTICES "${notices}"
+   fi
+   rm -f ${TMP_DIR}/OSupgrade                      # clean up update logging
+   UPGRADE_CNT=${todo}                             # update global update state var
    return $rts
 }
 
@@ -1151,8 +1172,11 @@ SERVICES[docker,APP]=https://get.docker.com  # use docker from docker.com
 # compose if compose is used, not yet needed
 #ADDON="docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-compose python3-docker"
 SERVICES[docker,ADDON]=python3-docker  # install docker addons
-# use python script inspect.py to check docker run args with running containers
+SERVICES[docker,PORT]=                 # default via local sockets, no remote access for docker commands
+# Docker Engine API port: 2375 (unencrypted, unauthenticated remote http access) docker commands
+#                     or  2376 (https access, needs TLS configuration!) unsupported yet
 
+# use python script inspect.py to check docker run args with running containers
 # DOCKER EXTRA packages
 # python only needed if python docker API is used, not yet needed
 # compose if compose is used, not yet needed
@@ -1165,8 +1189,8 @@ SERVICES[mosquitto,CONF]=/etc/mosquitto/conf.d/HAS.conf  # mqtt configuration fi
 # next will be used by optional/alternative MQTT docker container config as well
 # HOST=${HOSTIP:-localhost}            # LAN host for MQTT service
 SERVICES[mosquitto,HOST]=localhost     # default host for MQTT service
-SERVICES[mosquitto,PORT]=1883          # default service port 1883
-SERVICES[mosquitto,BRIDGE]=8883        # port in case there is a remote bridge active
+SERVICES[mosquitto,PORT]="1883 8883"   # default service port 1883, if bridge client: 8883
+SERVICES[mosquitto,BRIDGE]=            # port in case mosquitto is acting as bridge: eg IP:8883
 SERVICES[mosquitto,USER]=mosquitto     # default MQTT service system owner: user:password
 SERVICES[mosquitto,PREP]="MQTT credentials: either anonymous (dlft) or MQTT_USER:USER_PASSWORD.
 Use environment var MQTT_CRED=${MQTT_CRED:-MQTT_USER:USER_PASSWORD} to enable credential check."
@@ -1194,20 +1218,22 @@ SERVICES[autofs,CLIENT]=${SMB_CLIENT}
 
 # check if service on port arg1 is accessable (arg2: also from remote)
 # arg1: port, optional arg2: host (dflt HOSTIP local IP number)
-function LISTENING() {                 # port is accessable?
-    local H=${2:-${HOSTIP}}
-    MESSAGE INFO "Checking if port $1 can be accessed from remote IP ${H}. Max wait: 20 secs."
-    if netcat -w 10 -z $H ${1:-12345} 2>/dev/null
-    then
-        return 0
-    else
-        sleep 15                       # wait to allow process to start up
-        if netcat -w 10 -z $H ${1:-12345} 2>/dev/null
-	then
-	   return 0
-	fi
-    fi
-    return 2
+function LISTENING() {                     # port is accessable?
+    local H=${2:-${HOSTIP}} RTS=0
+    MESSAGE NOTICE "Checking if port $PRT can be accessed. Max wait: 20 secs."
+    for PRT in $( echo ${1} | sort | uniq)
+    do
+        if ! netcat -w 10 -z $H ${1:-12345} 2>/dev/null
+        then
+            sleep 10                       # wait to allow process to start up
+            if ! netcat -w 10 -z $H ${1:-12345} 2>/dev/null
+	    then
+	       MESSAGE NOTICE "Port $PRT is already in use by some service."
+	       RTS=1
+	    fi
+         fi
+    done
+    return $RTS
 }
 
 # function to obtain docker cmd 'run' from existing container
@@ -1767,13 +1793,13 @@ function TEST_DOCKER() {
 }
 
 function CONFIG_DOCKER(){
-    local SRVR=${1:-docker}
+    local SRVR=${1:-docker} RTS=0
     
     # install docker add on applications and/or libraries
     if [ -n "${SERVICES[$SRVR,ADDON]}" ]
     then
         MESSAGE INFO "Docker add on's installation: ${SERVICES[$SRVR,ADDON]// /, }."
-        APT::install ${SERVICES[$SRVR,ADDON]}
+	! APT::install ${SERVICES[$SRVR,ADDON]} && MESSAGE WARN "Docker add on (${SERVICES[$SRVR,ADDON]// /, }) failed."
     fi
 
     if ! [ -d "${DOCKERDIR}" ]                 # check if docker containers directory exists
@@ -1791,23 +1817,74 @@ function CONFIG_DOCKER(){
         ${SUDO:-sudo} usermod -aG docker $USER
         MESSAGE NOTICE "Group membership 'docker' is only activated after next login."
     else
-        SUDO=
+        SUDO=                                                # docker command is now available
     fi
-    TEST_DOCKER
-    return $?
+
+    if echo "${SERVICES[docker,PORT]/ */}" | grep -q '2375'  # remote docker commands (unsecured)
+    then
+	MESSAGE MOTICE "Docker deamon: adding remote commands on port ${SERVICES[docker,PORT]/ */}."
+	if ! [ -s /etc/docker/deamon.json ]                  # add local deflt docker deamon configuration
+	then                                                 # listen on all interfaces
+	    echo '{"hosts":["tcp://0.0.0.0:2375","unix:///var/run/docker.sock"]}' >${TMP_DIR}/deamon.json
+        else                                                 # change current dockerd configuration
+	    if which jq 2>/dev/null || APT::install jq       # need jq to merge json config file
+	    then
+		(cat /etc/docker/deamon.json ; echo '{"hosts":["tcp://0.0.0.0:2375","unix:///var/run/docker.sock"]}' ) | \
+		    jq -s -c add >${TMP_DIR}/deamon.json
+	    fi
+	fi
+	if [ -s ${TMP_DIR}/deamon.json ]                     # install local dockerd config file
+	then
+	    ${SUDO:-sudo} mv ${TMP_DIR}/deamon.json /etc/docker/deamon.json
+	    ${SUDO:-sudo} docker restart
+	else
+	    MESSAGE WARN "Docker deamon configuring remote installation failed."
+	    RTS=1
+	fi
+    elif [ -n "${SERVICES[docker,PORT]/ */}" ] ; then
+	MESSAGE WARN "Unsupported docker remote port: ${SERVICES[docker,PORT]/ */}."
+	RTS=1
+    fi
+
+    ! TEST_DOCKER && RTS=1
+
+    return $RTS
 }
 
-# check on anonimous message acceptation
+# check on anonimous message acceptation for subscribing and publishing
 function TEST_MOSQUITTO() {
+    if ! which mosquitto_sub 2>/dev/null || ! which mosquitto_pub 2>/dev/null
+    then
+        MESSAGE ERROR "Unable to test mosquitto: installed MQTT subscribe or publish?"
+        return 1
+    fi
+    function MQTT_sub() {
+        local mesg=NOTok
+        mesg=$(mosquitto_sub --host ${HOSTIP} -t test -C 1 2>/dev/null)
+        [ "$mesg" = OK ] && return 0
+        return 1
+    }
+
+    MQTT_sub &
+    local subproc=$! ; sleep 2
     if ! mosquitto_pub --host ${HOSTIP} -t test -m OK --quiet
     then
          MESSAGE ALERT "Mosquitto service is not accepting anonymous messages.\n Check logging mosquitto."
-	 return 1
+         kill $subproc
+         return 1
+    fi
+    wait $subproc ; subproc=$?
+    MESSAGE INFO "Mosquitto is accepting messages."
+    if (( "${subproc:-0}" > 0 ))
+    then
+         MESSAGE ALERT "Mosquitto service is not publising messages.\nCheck logging mosquitto."
+         return 1
     else
-	 MESSAGE INFO "Mosquitto is accepting messages."
+         MESSAGE INFO "Mosquitto is publishing messages."
     fi
     return 0
 }
+
 
 # configure mosquitto as used by zigbee2mqtt and other containers
 function CONFIG_MOSQUITTO() {
@@ -1857,14 +1934,58 @@ ${SERVICES[mosquitto,USER]/[a-zA-Z]*/user ${SERVICES[mosquitto,USER]/:*/}}
 #restart_timeout 5 30
 #try_private true
 pid_file /run/mosquitto/mosquitto.pid
-listener ${SERVICES[mosquitto,PORT]:-1883} ${SERVICES[mosquitto,BRIDGE]}
+$(for P in ${SERVICES[mosquitto,PORT]} ; do echo "listener $P" ; done)
 #persistence true
 #persistence_location /var/lib/mosquitto/
 log_dest file /var/log/mosquitto/mosquitto.log
 allow_anonymous $ANONIMOUS
 " | ${SUDO:-sudo} sed -e "w ${SERVICES[mosquitto,CONF]}" -e d
     ${SUDO:-sudo} sed -i -e 's/^persistence/# persistence/' -e 's/^user/# user/' -e 's/^log_dest/# log_dest/' /etc/mosquitto/mosquitto.conf
-    
+
+    if [ -n "${SERVICES[mosquitto,BRIDGE]}" ]
+    then
+	echo "# Description
+# Bridge to and from client broker running on pironman: HAS
+
+#log_type debug
+
+# Unique name for this connection instance
+connection OT-to-IT
+# The IP/Domain and Port of the remote broker you want to mirror
+address ${SERVICES[mosquitto,BRIDGE]}
+keepalive_interval 60
+
+# Clear the session on reconnect to avoid mismatched state issues
+cleansession false
+
+# Tells the remote broker that this connection is a bridge. 
+# Helps with loop detection and proper propagation of retained messages.
+try_private true
+
+# Define what to mirror:
+# Syntax: topic <pattern> <direction> <QoS> <local-prefix> <remote-prefix>
+# Setting "both" synchronizes both sides. Using "0" maps the topic trees exactly.
+topic # both 0 \"\" \"\"
+#topic # in 0 down/ to-level/02/line/
+#topic # out 0 up/ from-level/02/line/
+
+# start type
+#start_type automatic
+
+# Optional: Remote authentication (uncomment if the remote broker requires it)
+remote_username bridge
+remote_password klote2bridge
+#bridge_protocol_version mqttv311
+#bridge_protocol_version mqttv50
+
+# bridge secure: default false
+bridge_insecure true
+#bridge_cafile /etc/ssl/certs/ssl-cert-snakeoil.pem
+#bridge_certfile /etc/ssl/certs/ssl-cert-snakeoil.pem
+#bridge_keyfile /etc/ssl/private/ssl-cert-snakeoil.key
+" | ${SUDO:-sudo} sed -e "w /etc/mosquitto/conf.d/bridge.conf" -e d
+         MESSAGE NOTICE "Installing mosquitto bridging from ${SERVICES[mosquitto,BRIDGE]}."
+    fi    
     if ! ${SUDO:-sudo} systemctl --quiet restart mosquitto >/dev/null
     then
          MESSAGE ALERT "Failed to restart mosquitto service.\nCheck journal and logging: e.g. run 'mosquitto -v -c /etc/mosquitto/mosquitto.conf'"
@@ -1928,12 +2049,13 @@ function CONFIG_AUTOFS() {
     return 0
 }
 
+# ********************************************** install an OS system service deamon ************
 # install an OS system service
 function INSTALL_SERVICE() {
     local SRVR=${1}
-    if [ -n "${SERVICES[$SRVR,PORT]}" ] && LISTENING ${SERVICES[$SRVR,PORT]} REMOTE
+    if [ -n "${SERVICES[$SRVR,PORT]}" ] && LISTENING "${SERVICES[$SRVR,PORT]}"
     then
-         MESSAGE WARNING "There is already an $SRVR service running on port ${SERVICES[$SRVR,PORT]:-1883}. Skipping installation."
+         MESSAGE WARNING "There is already an $SRVR service running. Port (${SERVICES[$SRVR,PORT]/ */}. Skipping installation."
     else # install service via apt
 	 ! APT::install $SRVR && return 1
     fi
@@ -2042,8 +2164,9 @@ function ADD_SERVICE(){
     return $STATUS
 }
  
+# **************************************** install a container *************************
 # import (pull) Home Assistant docker container image. Arg: container name.
-function GET_IMAGE(){
+function INSTALL_CONTAINER(){
     local IMG=0
     declare -i CNT=0 rts=0
     if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi  # enouph disk space?
@@ -2234,7 +2357,7 @@ function ZIGBEE2MQTT_MQTT(){
     do
         case "$ITEM" in
           server)
-            if ! LISTENING ${SERVICES[mosquitto,PORT]:-1883} ${SERVICES[mosquitto,HOST]:-localhost}
+            if ! LISTENING "${SERVICES[mosquitto,PORT]:-1883}" ${SERVICES[mosquitto,HOST]:-localhost}
             then
 	        MESSAGE NOTICE "No running MQTT service (mosquitto?), detected.\nService is needed for zigbee2mqtt or configure a remote one."
                 return 1
@@ -2557,7 +2680,7 @@ function ADD_CONTAINER(){
     declare -i STATUS=0
     case ${CNTR} in
     mqtt5)
-        if pgrep mosquitto >/dev/null && LISTENING ${SERVICES[mosquitto,PORT]:-1883} 
+        if pgrep mosquitto >/dev/null && LISTENING "${SERVICES[mosquitto,PORT]:-1883}"
         then
             MESSAGE WARNING "MQTT 'mosquitto' service is already active on port ${SERVICES[mosquitto,PORT]:-1883}."
 	    LOGGER ERR "'${CNTR}' port ${SERVICES[mosquitto,PORT]:-1883} busy"
@@ -2568,7 +2691,7 @@ function ADD_CONTAINER(){
     UPDATE_SYSTEM                                        # make sure OS system is up to date
 
     # check if image is installed. If not install/pull it from repository 
-    GET_IMAGE "${CNTR}"
+    INSTALL_CONTAINER "${CNTR}"
     case $? in
      5)
 	 MESSAGE ERROR "Not enough disk space for container '${CNTR}'" "Skipped"
@@ -2651,7 +2774,7 @@ function ADD_CONTAINER(){
     do
 	PRT=${PRT/:*/}
         # in case someone else is using the web port
-	if LISTENING ${PRT}
+	if LISTENING "${PRT}"
 	then
 	    if [ -z "${ARCHIVED[${CNTR}]}" ]     # container needs to be restored
             then
@@ -3165,7 +3288,7 @@ then
     for ITEM in ${CONTAINERS}                    # ****** docker containers handling
     do
        declare -i BEFORE AFTER
-       MESSAGE STATE "Docker container ${ITEM}"
+       MESSAGE STATE "Installing docker container ${Bold}${ITEM}${Unbold}"
        CHECK_FREESPACE "${ITEM}" BEFORE
        if ! ADD_CONTAINER "${ITEM,,}"
        then
