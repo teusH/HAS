@@ -3,6 +3,7 @@ Home Assistant toolset, e.g. script to install  HAS with companion docker contai
 
 ## containers-install.sh
 Bash script to install docker containers family on RPi (work in progress): Home Assistant, Zigbee2MQTT, Mosquitto, WUD, Portainer, etc.
+Dependend applications are added automatically.
 
 ### How to use this command:
 *containers-install.sh [--level=LEVEL|--debug|help|default|install|purge|container|upgrade/service ...]*
@@ -56,8 +57,6 @@ Optional arguments:
  Hint: save the dumps on a separate filesystem! To do: encrypt the archive.
  
 *restore container name ... * Restore a (compressed) container dump file or config file.
-
-*upgrade" (Full) upgrade of debian OS and applications.
          
 Notice: Side effect installing a container is the file 'setup.sh' is generated in the container home directory.
 If setup.sh is available or command option *help container* from script looks ok,
@@ -79,8 +78,12 @@ Docker container may use a serial dongle device. The group needed to access it i
     *mosquitto*       : Mosquitto system broker service for MQTT messages e.g. from zigbee2mqtt, tasmota, etc.
   
     *docker*          : Docker container install and management system service/deamon.
+
+    *autofs*          : Autofs for archiving via CIFS (Samba smb) archife file to a remote e.g. NAS system. (not yet tested).
+
+    *upgrade*         : Upgrading the OS system e.g. dayly via 'cron' or automaticcaly when the script is installing containers or services.
   
-Manage the debian service via CLI command (remote ssh):
+Manage the debian OS service via CLI command (e.g. via remote ssh):
 
   sudo systemctl [start|restart|stop|status|enable] ServiceName.
 
@@ -104,8 +107,9 @@ Available and configured docker containers:
   
 Manage docker containers via CLI command: *docker [ps|restart|stop|status] dockerContainerName* or uset 'setup.sh' in the home directory (default /opt/containers/<container_name>) of the container.<br/>
 Or use (remote) *portainer* or *wud*.
+
 ### Security
-The script only uses sudo when needed. 
+The script only uses sudo when needed. Default the script will install applications running as anonymous user. Change this in the configuarion of the script if needed so.
 
 Hint: after downloading the script take a look at the bash source. In particular look at the SUDO statemanets.
 
