@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 5.1 $ $Date: 2026/10/28 21:04:40 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 5.3 $ $Date: 2026/11/01 17:51:11 $' | awk '{ printf("V%s_%s", $2,$5);}')
 #
 #if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then echo "BASH DEBUG MODE" 1>&2 ; fi
 SCRIPT=$(basename $0)
@@ -56,7 +56,7 @@ CONTAINERS=                          # unordered list of services/containers to 
 DEAMONS=
 
 CURSOR=1:1                           # default last cursor position in window
-CURSOR_POS() {                       # get current cursor position line;col
+function CURSOR_POS() {                       # get current cursor position line;col
   local pos
   IFS='[;' read -p $'\e[6n' -d R -a pos -rs || echo "failed with error: $? ; ${pos[*]}"
   printf -v "$1"  "${pos[1]}:${pos[2]}"
@@ -181,27 +181,33 @@ function CLEANUP::failure() {         # show error files
 SUBshell=$$                                # flag which shell or subshell we are running
 function CLEANUP() {
   declare -i RTS=${1:-$?}
-  #[ "$SUBshell" != "$$" ] && echo "CLEANUP called from subshell $!"
   [ "$SUBshell" != "$$" ] && return 0      # do not if in subshell
-  #echo "CLEANUP called from main shell pid $$"
-  #CURSOR_POS posyx
   if [ $RTS -eq 0 ]; then
     CLEANUP::success
   else
     CLEANUP::failure
   fi
+  
+  #local POS ; CURSOR_POS POS
+  #for (( i=${POS/:*/} ; i <= ${CURSOR/:*/} ; i++ )) ; do echo ; done
   [ -n "$BARinit" ] && BAR::RESET          # should not happen
+  [ -n "$(tty)" ] && tput cud1
   if (( $RTS > 0 ))
   then
       MESSAGE ERROR "Failed on $RTS packages"
-  else
-      MESSAGE OK "DONE"
+  # else MESSAGE OK "DONE"
   fi
   if [ "$TMP_LOG" != /dev/null ] && [ -s "$TMP_LOG" ]
-  then echo -e  "\n\n\n\nInstallation logging saved in ${Blue}$TMP_LOG${Reset}." >$VERBOSE
+  then
+      MESSAGE NOTICE "Installation logging saved in ${Blue}$TMP_LOG${Reset}."
   fi
-  CURSOR_POS CURSOR                        # save cursor position for restore
-  if [ -n "$(tty)" ] ; then tput cup ${CURSOR/:*/} 0 ; tput cud1 ; tput ed ; fi
+  if [ -n "$(tty)" ]
+  then
+      tput ed
+      CURSOR_POS CURSOR                     # save cursor position for restore
+      #echo "Cleanup pos 3: $CURSOR"
+      tput cup ${CURSOR/:*/} 0 ; tput cud1 ; tput ed
+  fi
 }
 # interrupt processing the script
 function INTERRUPTED() {
@@ -367,14 +373,15 @@ function BAR::PRINT() {        # generate title, progress bar, eleapsed secs and
    # calculate seconds to percentage max 100
    if [ -n "$1" ] ; then title="$1" ; fi
 
-   while (( cur <= (percent*220+step) ))    # start producing progress bar
+   local max="(expect ${secs}s)"
+   while (( cur <= (percent*420+step) ))    # start producing progress bar
    do
       (( $STOP == 1 )) && break   # stop bar stepping up
       declare -i  cols=$(tput cols)
-      local bar max
-      max="(max ${secs}s)"
-
-      cols=$(( cols-${#title}-${#cursecs}-${#max}-7 ))
+      local bar elapsed
+      elapsed=$(bc <<< "min = ${cursecs}/60 ; print min , \"m\" ; scale = 1 ; print ${cursecs} - (min *60) ")
+      elapsed=${elapsed/#0m/}
+      cols=$(( cols-${#title}-${#elapsed}-${#max}-7 ))
       printf -v bar "%$(( cur*cols/($percent*100)+1 ))s" " "
       cur+=${step}                # current percentage done
       # prepair to print the progress bar
@@ -399,7 +406,7 @@ function BAR::PRINT() {        # generate title, progress bar, eleapsed secs and
       bar="$(printf "[%-${cols}s]" "${bar}")"
       bar=$(echo "${bar}" | sed 's/#/▇/g')
       # print <title><bar><secs><max secs>
-      bar="$(tput sgr0; tput bold)${title} $(tput setab 5; tput setaf 7)${bar} ${cursecs}s$(tput sgr0) ${max}"
+      bar="$(tput sgr0; tput bold)${title} $(tput setab 5; tput setaf 7)${bar} ${elapsed}s$(tput sgr0) ${max}"
 
       BAR::printbar "${bar}"      # print progress bar
       sleep ${slp_time}           # sleep a little while
@@ -541,7 +548,7 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
    (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
    (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710-(5*secs))/70 ))
    BAR::INIT
-   BAR::PRINT "${1:-  }" ${secs} ${freq} "$$" &     # start USR1 signaler freq 3 per sec
+   BAR::PRINT "${1:-  }" ${secs} ${freq} "$$" & # start USR1 signaler freq 3 per sec
    BARrunning=$!
    echo
    return 0
@@ -604,9 +611,21 @@ function APT::install() {
 
 # filter function for apt upgrade logging. Support for LANGUAGE NL and UK/US
 # display a compacted log of actions from apt command
+# awk on RPi shows std IO buffering problems, gawk is used instead
+GAWK=gawk
 function APT::filter() {
-   # awk on RPi shows std IO buffering problems, gawk is used instead
-   stdbuf -oL gawk '
+   if [ "$GAWK" = gawk ] && ! which gawk >/dev/null  # check only once, if no gawk try to install it
+   then
+        LOGGER NOTICES "Try to install gawk application."
+	! ${SUDO:-sudo} apt install --yes -q#2 gawk 2>/dev/null || \
+            MESSAGE WARN "Unable to install gawk needed by APT::show."
+	GAWK=NO
+   fi
+
+   if [ "$GAWK" != gawk ]                    # gawk not available, do not filter
+   then stdbuf -o0 cat
+   else
+        stdbuf -oL gawk '
       BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 ; db = 0 }
       /^Hit:/||/Setting up/||/^Instellen/||/^Get:/||/^Ophalen:/||/afhandelen van triggers/||/Bezig met uitpakken/{ item = $0;
           sub("^.*Get:.*","Get",item); sub("^.*Ophalen:.*","Geraakt",item);
@@ -641,6 +660,8 @@ function APT::filter() {
           printf("\nApt updating time: %d minutes and %d seconds\n",timing/60, timing%60);
       }
     '
+   fi
+   return $?
 }
 
 # filter output and log
@@ -691,7 +712,7 @@ function UPGRADABLE() {
             printf -v ${fake} "%s" "0:0:0:0"
 	    return 1
        fi
-       BAR::START "updates?" 15
+       BAR::START "OS updates?" 15
        # check if there are upgradeable packages
        LANGUAGE=en ${SUDU:-sudo} apt update -q 2>/dev/null  | \
 	       sed -e 's/^\r//' -e 's/\r$//' -e 's/\r/\n/g' | \
@@ -718,18 +739,12 @@ function UPGRADABLE() {
 
 # upgrade the OS system CLI language: gb_GB.UTF-8
 function UPDATE_SYSTEM() {
-   declare -i RTS=0 CNT=0 ; local delay
-   # APT::filter on RPi awk has std io buffer bug, so gawk is installed
-   if ! which gawk >/dev/null
-   then
-	APT::install gawk || MESSAGE FATAL "Unable to install gawk needed in APT::show function."
-	sleep 2                                   # give system some time to finish installation
-   fi
+   declare -i RTS=0 CNT=0
    #
    # full-upgrade: basic plus hold packages incl removal
    function UPGRADE() {                           # arg1: type (upgrade or full-upgrade
        # returns 1 on failure                     # arg2: nr onhold
-       local type ans=no delay nr=0:0:0:0
+       local type ans=no nr=0:0:0:0
        declare -i onhold=0 mysecs=0         # timing=0
        type=${1,,} ; sudo true                    # sudo cache update
 
@@ -754,18 +769,18 @@ function UPDATE_SYSTEM() {
        MESSAGE NOTICE "Trying to ${type/full-/fully } ${nr/:*/} OS system packages."
        local tuned
        BAR::secs $mysecs tuned
-       delay="$(( $tuned/60 )) minutes $(( ${tuned}%60 )) seconds,"
-       (( ($tuned/60 +1) > 6 )) && \
-	       MESSAGE WARNING    "Can take $delay ..."
-       (( ($tuned/60 +1) <=  2 )) && \
-	       MESSAGE INFO    "Can take $delay ..."
-       (( ($tuned/60 +1) <=  6 )) && (( ($mysecs/60 +1) >  2 )) && \
-	       MESSAGE NOTICE "Can take $delay ..."
+       MESSAGE NOTICE "OS updates takes about $(( $tuned/60 + 1 )) minutes."
 
-       if TTY && [ "${type}" = upgrade ]
+       if (( ($tuned/60) > 10 ))                    # more as 10 minutes, skip upgrading
+       then
+	       MESSAGE WARNING "Skipping OS updates. Limit is 10 minutes (expect timing is $(($tuned/60))."
+	       MESSAGE NOTICE "Try manual OS update 'sudo apt update ; sudo apt ${type,,}'."
+	       UPGRADE_CNT="0:0:0:${nr/:*/}" ; printf -v ${2:-fake} "%s" "$UPGRADE_CNT"
+	       return 0
+       elif TTY && [ "${type/*upgrade/upgrade}" = upgrade ]
        then
 	   read -p "Hit ${Blue}enter key${Reset} within 10 seconds to ${Blue}${Under}skip the OS ${type^^}${Reset}." -t "${T:-10}" ans
-           (( $? > 0 )) && ans=no
+           (( $? > 0 )) && ans=no && echo >$VERBOSE
 	   echo -e -n "$(tput cuu1; tput el)" >$VERBOSE
        else ans=no
        fi
@@ -830,7 +845,7 @@ function UPDATE_SYSTEM() {
    if (( ${rts} != 0 ))
    then
        notices="OS system packages upgrade is not completed."
-       ERRORS OSupgrade && MESSAGE SKIPPED ${notices:-Upgrade not completed}
+       # ERRORS OSupgrade && MESSAGE SKIPPED ${notices:-Upgrade not completed}
    fi
    if [ -n "$notices" ]
    then
@@ -838,7 +853,7 @@ function UPDATE_SYSTEM() {
    fi
    rm -f ${TMP_DIR}/OSupgrade                      # clean up update logging
    UPGRADE_CNT=${todo}                             # update global update state var
-   return $rts
+   return 0                                        # next time, try again
 }
 
 # #######################################################################
@@ -1219,7 +1234,8 @@ SERVICES[docker,APP]=https://get.docker.com  # use docker from docker.com
 SERVICES[docker,ADDON]=python3-docker  # install docker custom
 SERVICES[docker,PORT]=                 # default via local sockets, no remote access for docker commands
 # Docker Engine API port: 2375 (unencrypted, unauthenticated remote http access) docker commands
-#                     or  2376 (https access, needs TLS configuration!) unsupported yet
+#                         see https://gist.github.com/styblope/dc55e0ad2a9848f2cc3307d4819d819f
+#                         or 2376 (https access, needs TLS configuration!) unsupported yet
 
 # use python script inspect.py to check docker run args with running containers
 # DOCKER EXTRA packages
@@ -2237,7 +2253,7 @@ function ADD_SERVICE(){
 # import (pull) Home Assistant docker container image. Arg: container name.
 function INSTALL_CONTAINER(){
     declare -i CNT=0 rts=0
-    if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi  # enouph disk space?
+    if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi   # enouph disk space?
     MESSAGE NOTICE "Check and get latest container '${1}' image '${DOCKERS[${1},IMAGE]}'.\nThis takes some while..."
     # some container repros fail first time, but are succefull second trial. E.g. go2rtc pull image.
     # check if there is an update.
@@ -2245,15 +2261,18 @@ function INSTALL_CONTAINER(){
     # Return 2 if image was up to date. Return 4 on failure. Return 3 on image inspect error.
     for (( CNT=0; CNT <= 2; CNT++ ))
     do
-	local M=$(( ${DOCKERS[${1},MEM]/+*/}*22/400 ))              # default 22/400*Mb
+	local M=$(( ${DOCKERS[${1},MEM]/+*/}*22/400 )) # default 22/400*Mb
 	[ -n "${DOCKERS[${1},TIME]}" ] && M=${DOCKERS[${1},TIME]} # or measured secs
+	BAR::secs "$M" M                               # tune guessed install time
+	(( $M > 600 )) && MESSAGE NOTICE "$1 container installation will take more as $(( $M/60 +1 )) minutes!."
 	BAR::START "Pull $1 image:" ${M:-30} DOC
-        if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" 2>&1 | tee ${TMP_DIR}/pull
+        if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" 2>&1 | tee ${TMP_DIR}/pull | \
+		grep -P -v '(Download complete|Pulling fs)'
         then                  # some repros e.g. go2rtc have caching problems. Try again.
             BAR::STOP
 	    MESSAGE WARNING "Failure $(( CNT+1 )) to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again?"
             ERRORS pull
-	    sleep 5           # give server some time
+	    sleep 5                                    # give server some time
 	    rm -f ${TMP_DIR}/pull
 	else
 	    BAR::STOP # timing
@@ -2420,18 +2439,23 @@ function REMOVE_IMAGE(){
 # zigbee2mqtt configuration via environment settings iso via configuration.yaml
 # see for more: https://www.zigbee2mqtt.io/guide/configuration/mqtt.html
 function ZIGBEE2MQTT_MQTT(){
-    local ITEM
+    local ITEM PRT
     for ITEM in $@
     do
         case "$ITEM" in
           server)
-            if ! LISTENING "${SERVICES[mosquitto,PORT]:-1883}" ${SERVICES[mosquitto,HOST]:-localhost}
-            then
-	        MESSAGE NOTICE "No running MQTT service (mosquitto?), detected.\nService is needed for zigbee2mqtt or configure a remote one."
-                return 1
-	    fi
-	    echo "  server: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${SERVICES[mosquitto,PORT]:-1883}"
-            MESSAGE INFO "Using MQTT service: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${SERVICES[mosquitto,PORT]:-1883}."
+            for PRT in ${SERVICES[mosquitto,PORT]}
+            do
+                if LISTENING "${PRT}" ${SERVICES[mosquitto,HOST]:-localhost}
+                then
+	             echo "  server: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${PRT}"
+                     MESSAGE INFO "Using MQTT service: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${PRT]}."
+                     break
+                fi
+            done
+	    [ -z "$PRT" ] && \
+               MESSAGE WARNING "No running MQTT service (mosquitto?), detected.\nService is needed for zigbee2mqtt or configure a remote one." && \
+               return 1
           ;;
           user)
             if [ -n "${SERVICES[mosquitto,CLIENT]/:*/}" ]
