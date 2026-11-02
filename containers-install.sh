@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 5.3 $ $Date: 2026/11/01 17:51:11 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 5.5 $ $Date: 2026/11/02 21:51:16 $' | awk '{ printf("V%s_%s", $2,$5);}')
 #
 #if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then echo "BASH DEBUG MODE" 1>&2 ; fi
 SCRIPT=$(basename $0)
@@ -44,19 +44,19 @@ then
 else                                 # clean up old temporary used dirs
     find $(dirname "$TMP_DIR") -maxdepth 1 -name 'DocInst_*' -a -type d -a -exec rm -rf '{}' ';'
 fi
-TMP_DIR=$(mktemp -d ${TMP_DIR}XXXXXXXXXX)  # directory for temporary files
-TMP_LOG="./LOG-RUN_${SCRIPT/%\.sh/.log}"          # save logging of the work done
+TMP_DIR=$(mktemp -d ${TMP_DIR}XXXXXXXXXX)         # directory for temporary files
+TMP_LOG="$(pwd)/LOG-RUN_${SCRIPT/%\.sh/.log}"     # save logging of the work done
 if [ -s "$TMP_LOG" ] ; then rm -f "$TMP_LOG" ; fi # clean up
 METERING=${METERING:-on}             # turn timing logging on/off
 # no progress bar show: yes/none
-NOPROGRESS=                                       # default turned on
+NOPROGRESS=                          # default turned on
 [ -n "${_Dbg_DEBUGGER_LEVEL}" ] && NOPROGRESS=yes # in bashdb modus the bar makes no sense
 
 CONTAINERS=                          # unordered list of services/containers to install
 DEAMONS=
 
 CURSOR=1:1                           # default last cursor position in window
-function CURSOR_POS() {                       # get current cursor position line;col
+function CURSOR_POS() {              # get current cursor position line;col
   local pos
   IFS='[;' read -p $'\e[6n' -d R -a pos -rs || echo "failed with error: $? ; ${pos[*]}"
   printf -v "$1"  "${pos[1]}:${pos[2]}"
@@ -288,7 +288,7 @@ function MESSAGE() {
         ;;
         0) L="${Gray}${L^^}${Reset}"
         ;;
-        *) return 1                        # do not show message
+        *) return 1                               # do not show message
         ;;
     esac
     # show message when level is higher as quiet level
@@ -373,8 +373,9 @@ function BAR::PRINT() {        # generate title, progress bar, eleapsed secs and
    # calculate seconds to percentage max 100
    if [ -n "$1" ] ; then title="$1" ; fi
 
-   local max="(expect ${secs}s)"
-   while (( cur <= (percent*420+step) ))    # start producing progress bar
+   local max="(expect $(bc <<< "min = ${secs}/60 ; print min , \"m\" ; scale = 1 ; print ${secs} - (min *60) ")s)"
+   max="${max/0m/}"
+   while (( cur <= (percent*220+step) ))    # start producing progress bar
    do
       (( $STOP == 1 )) && break   # stop bar stepping up
       declare -i  cols=$(tput cols)
@@ -457,7 +458,7 @@ function BAR::STOP() {            # stop progress bar
 # on exit close bar virtual window on bottom window
 function BAR::RESET(){
     BAR::STOP
-    tput csr 0 $(( $(tput lines)-1 ))   # Reset scroll region
+    tput csr 0 $(( $(tput lines)-1 )) # Reset scroll region
     tput rmcup                        # Exit alternate screen
     tput cnorm                        # Restore cursor exit 0
     unset BARinit
@@ -500,13 +501,13 @@ function BAR::secs() {                # calibrate seconds, optional arg2: docker
 	V=$(ping -c 3 -w 2 github.com | grep '^rtt' | sed -e 's/.*=[^\/]*\/[0-9\.]*\/\([^\.]*\).*/\1/')
 	[ -z "$V" ] && return 1
 	# using msec difference times correction factor 6
-	echo "$((  (${V}-12)*6 ))" # percentage of difference to ref situation
+	echo "$((  (${V}-12)*6 ))"    # percentage of difference to ref situation
 	return 0
     }
 
     if (( BARfactor == 0 ))
     then
-	BARfactor=100                           # reference RPi5, usual SD card and 1G ethernet 
+	BARfactor=100                 # reference RPi5, usual SD card and 1G ethernet 
 	
 	ARCH=$(hostnamectl | grep -m 1 'Architecture: ' | sed 's/.*: //')
 	if [ -f /sys/firmware/devicetree/base/model ]
@@ -514,7 +515,7 @@ function BAR::secs() {                # calibrate seconds, optional arg2: docker
 	else ARCH+="/desktop"
 	fi
         # adjust to RPi model RPi4 (model B)
-        if echo "$ARCH" | grep -q 'Pi 4'        # RPi 4
+        if echo "$ARCH" | grep -q 'Pi 4'              # RPi 4
 	then BARfactor=300
 	elif echo "$ARCH" | grep -q 'x86-64/desktop'  # Intel desktop
 	then BARfactor=100
@@ -543,8 +544,8 @@ function BAR::START() {         # start bar args: max sec, freq/sec, title, [TIM
    BARtiming=$(date +%s.%2N)
    BAR::secs ${secs} secs
    [ "$METERING" = on ] && LOGGER INFO "Progress meter for ${1:-undefined} estimated time ${secs} seconds."
-   [ -n "${NOPROGRESS}" ] && return 0          # do not show progress bar
-   (( secs < 4 )) && return 0                  # time too short for a progress bar
+   [ -n "${NOPROGRESS}" ] && return 0           # do not show progress bar
+   (( secs < 4 )) && return 0                   # time too short for a progress bar
    (( secs < 30 )) && freq=8 ; (( secs > 100 )) && freq=3
    (( secs >= 30 )) && ((secs <= 100 )) && freq=$(( (710-(5*secs))/70 ))
    BAR::INIT
@@ -583,12 +584,12 @@ function APT::install() {
           MESSAGE INFO "Installing ${SRVR} OS package via bash script."
           # docker.com installs with bash file, debug with --dry-run
           curl -sSL ${SRVR} >${TMP_DIR}/install && \
-              ${SUDO:-sudo} stdbuf -oL bash ${TMP_DIR}/install 2>&1 | \
+              ${SUDO:-sudo} bash ${TMP_DIR}/install 2>&1 | \
               tee -a $TMP_DIR/install | grep -v '^+ sh -c'
         ;;
         *)                                   # default just SRVR name is used
           MESSAGE INFO "Installing ${SRVR} OS package via apt."
-          LANGUAGE=en ${SUDO:-sudo} stdbuf -o0 apt-get install $SRVR -y -qq 2>&1 | \
+          LANGUAGE=en ${SUDO:-sudo} apt-get install $SRVR -y -qq 2>&1 | \
 	      sed -e 's/^\r//' -e 's/\r$//' -e 's/\r/\n/g' | \
               APT::show log=install priority=NOTICE filter="APT::filter"
         ;;
@@ -612,49 +613,60 @@ function APT::install() {
 # filter function for apt upgrade logging. Support for LANGUAGE NL and UK/US
 # display a compacted log of actions from apt command
 # awk on RPi shows std IO buffering problems, gawk is used instead
-GAWK=gawk
 function APT::filter() {
-   if [ "$GAWK" = gawk ] && ! which gawk >/dev/null  # check only once, if no gawk try to install it
-   then
-        LOGGER NOTICES "Try to install gawk application."
-	! ${SUDO:-sudo} apt install --yes -q#2 gawk 2>/dev/null || \
-            MESSAGE WARN "Unable to install gawk needed by APT::show."
-	GAWK=NO
-   fi
-
    if [ "$GAWK" != gawk ]                    # gawk not available, do not filter
-   then stdbuf -o0 cat
+   then cat
    else
-        stdbuf -oL gawk '
-      BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 ; db = 0 }
-      /^Hit:/||/Setting up/||/^Instellen/||/^Get:/||/^Ophalen:/||/afhandelen van triggers/||/Bezig met uitpakken/{ item = $0;
+        gawk '
+      BEGIN { cur=":"; cnt=0; prt = 1; item = ""; timing = systime(); dkms = 0 ; db = 0 ;
+          tty = system("tty >/dev/null");
+      }
+      function TPUT(str) { if (tty == 0) { printf("%s",str) } }
+
+      /^Unpacking/||/^Hit:/||/Setting up/||/^Get:/||/^Extracting/{
+          item = $0;
           sub("^.*Get:.*","Get",item); sub("^.*Ophalen:.*","Geraakt",item);
           sub("^.*Hit:.*","Get",item); sub("^.*Geraakt:.*","Ophalen",item);
+          sub("^Unpacking.*","Unpacking",item);
+          sub("^Setting up.*","Setting_up",item);
+          sub("^Processing.*","Processing",item);
+          sub("^Extracting.*","Extracting",item);
+      }
+      /^Hit/||/Setting.up/||/^Get/||/^Unpacking/||/^Processing/||/Extracting/{
+          if ( item == "" ) { item = $1; gsub("[1-9]*:","",item)}
+          if( item == cur ) { printf("%s%s: %d\n", "\033[A", item, ++cnt, "\033[K")}
+          else              { cur = item; cnt = 0; printf("%s: %d%s\n", item, ++cnt, "\033[K");
+                              item = "" ; prt = 0; }
+          next;
+      }
+      /^Instellen/||/^Ophalen:/||/afhandelen van triggers/||/Bezig met uitpakken/{
+          item = $0;
           sub("^.*afhandelen van triggers.*","afhandelen triggers",item);
           sub("^Bezig met uitpakken.*","Uitpakken",item);
-	  sub("^Setting up.*","Setting_up",item);
+          sub("^Instellen.*","Instellen",item);
+          sub("^Ophalen.*","Ophalen",item);
+      }
+      /^Instellen/||/Ophalen:[1-9]/||/^Uitpakken/||/afhandelen van triggers/{
+          if ( item == "" ) { item = $1; gsub("[1-9]*:","",item)}
+          if( item == cur ) { printf("%s%s: %d\n", "\033[A", item, ++cnt, "\033[K")}
+          else              { cur = item; cnt = 0; printf("%s: %d%s\n", item, ++cnt, "\033[K");
+                              item = "" ; prt = 0; }
+          next;
       }
       /.*can be upgraded.*to see.*/{ next ; }
-      /^Hit/||/Setting.up/||/^Instellen/||/^Get/||/^Unpacking/||/^Processing triggers/||/Ophalen:[1-9]/||/^Uitpakken/||/afhandelen van triggers/{
-          if ( item == "" ) { item = $1; gsub("[1-9]*:","",item)}
-		  if( item == cur ) { system("tput cuu1"); printf("%s: %d\n", item, ++cnt)}
-          else { cur = item; cnt = 0; printf("%s: %d\n", item, ++cnt)}
-	  system("tput el"); item = "" ; prt = 0;
-      }
       /^ . dkms: autoinstall for kernel/ { if (dkms++ > 0 ) printf("\n%s", $0);}
       /^Found:/ { print;}
-      /^\(Database /||/^\(Reading database/||/^Extracting /{ prt = 0;
-          if ( db++ > 0 ) { system("tput cuu1; tput el");}; print; next;
+      /^\(Database*\)/||/^\(Reading database*\)/||/^Fetched /{ db = 0 } # end of DB
+      /^\(Database /||/^\(Reading database/||/^Fetched /{
+          prt = 0; if ( db == 0 ) { printf("\n") }
+          if ( db++ > 0 ) { printf("\033[A\033[K%s%s\n",$0,"\033[K");}
       }
-      /^\(Database*\)/||/^\(Reading database*\)/{
-          db = 0; next } # end of DB reading
-      /^Fetched / { printf("\n"); } # end of Extracting
       /^Adding boot/||/^[dD]one/ {  printf("\n"); prt += 1; next;}
       /^Running module/||/^  *- .*riginal module/||/^ - Installation/||/^depmod\.\./||/^$/{ next ; }
       /^Reading package lists/||/Building dependency tree/||/Reading state information/||/packages can be upgraded/{
           print; fflush(); next;
       }
-      { if( prt ) { print; } ; fflush(); }
+      { if( prt ) { print; fflush(); } }
       END {
           timing = systime()-timing ;
           printf("\nApt updating time: %d minutes and %d seconds\n",timing/60, timing%60);
@@ -671,13 +683,13 @@ function APT::show() {
     while  [ -n "$1" ]
     do
        case "$1" in
-       filter=*)   filter="${1/*=/}"              # function to filter logging
+       filter=*)   filter="${1/*=/}"         # function to filter logging
        ;;
-       channel=*)  channel="${1/*=/}"             # output channel file, null or std/err
+       channel=*)  channel="${1/*=/}"        # output channel file, null or std/err
        ;;
-       log=*)   log="${1/*=/}"                    # unfiltered log file or null
+       log=*)   log="${1/*=/}"               # unfiltered log file or null
        ;;
-       priority=*) priority="${1/*=/}"            # priority level for output usually NOTICE
+       priority=*) priority="${1/*=/}"       # priority level for output usually NOTICE
        ;;
        esac
        shift
@@ -685,7 +697,7 @@ function APT::show() {
     [ -n "${DEBUG}" ] && filter=cat
     if ! type -t ${filter} 2>/dev/null >/dev/null
     then filter=cat
-    fi                                            # make sure filter function exists
+    fi                                       # make sure filter function exists
     # priority level -> priority
     if [ -z "${LEVEL[${priority:-undef}]}" ]
     then  channel=/dev/null ; filter=cat ; output=/dev/null
@@ -693,16 +705,16 @@ function APT::show() {
     then log=/dev/null ; filter=cat
     fi
     [ "$log" != /dev/null ] && [ -d "${TMP_DIR}" ] && log="$TMP_DIR/$log"
-    stdbuf -oL tee -a "$log" | $filter >"$channel"
+    tee -a "$log" | $filter >"$channel"
     return $?
 }
 
 # check if system needs to be updated. Update if last update was older as a week ago
-UPGRADE_CNT=                                      # nr of upgradable packages. Dlft: undefined
+UPGRADE_CNT=                                 # nr of upgradable packages. Dlft: undefined
 function UPGRADABLE() {
    local CNT="$UPGRADE_CNT" fake=${1:-fake}
    [ -z "$UPGRADE_CNT}" ] && MESSAGE STATE "Checking OS system for updates"
-   [ -n "${2}" ] && UPGRADE_CNT=""                # reset count
+   [ -n "${2}" ] && UPGRADE_CNT=""           # reset count
    if [ -z "$UPGRADE_CNT" ]
    then
        [ -n "${2}" ] && MESSAGE INFO "Checking OS system for remaining updates"
@@ -723,7 +735,7 @@ function UPGRADABLE() {
 	       grep 'upgraded, ' | tee -a ${TMP_DIR}/upgrades | \
 	       sed -e 's/[0-9][0-9]*/:&/g' -e 's/[^0-9:]//g' -e 's/^://' -e '/^ *$/d' | \
                grep -P '^([0-9])+(:([0-9])+){3}$' )  # nr upgraded:nr installed:nr autoremoved:nr kept
-       [ -z "${CNT}" ] && CNT=0:0:0:0                # count failed
+       [ -z "${CNT}" ] && CNT=0:0:0:0        # count failed
        (( "${CNT/:*/}" > 0 )) && [ -s ${TMP_DIR}/upgrades ] && [ -z "${INSTALLED[upgrade]}" ] && \
            INSTALLED[upgrade]="$(cat ${TMP_DIR}/upgrades ) " # only once
        (( "${CNT/*:/}" > 0 )) && INSTALLED[kept]="OS system packages kept back: ${CNT/*:/}."
@@ -737,16 +749,29 @@ function UPGRADABLE() {
    return 0
 }
 
+GAWK=gawk                                    # need gawk iso awk in logging filter
 # upgrade the OS system CLI language: gb_GB.UTF-8
 function UPDATE_SYSTEM() {
    declare -i RTS=0 CNT=0
+   if [ "$GAWK" = gawk ] && ! which gawk >/dev/null  # check only once, if no gawk try to install it
+   then
+        LOGGER NOTICES "Try to install gawk application."
+	if ! ${SUDO:-sudo} apt install --yes -qq gawk 2>/dev/null >/dev/null
+	then
+            MESSAGE WARN "Unable to install gawk needed by APT::show."
+	    GAWK=cat
+	else
+	    LOGGER NOTICES "Installed gawk application"
+	fi
+   fi
+
    #
    # full-upgrade: basic plus hold packages incl removal
-   function UPGRADE() {                           # arg1: type (upgrade or full-upgrade
-       # returns 1 on failure                     # arg2: nr onhold
+   function UPGRADE() {                      # arg1: type (upgrade or full-upgrade
+       # returns 1 on failure                # arg2: nr onhold
        local type ans=no nr=0:0:0:0
-       declare -i onhold=0 mysecs=0         # timing=0
-       type=${1,,} ; sudo true                    # sudo cache update
+       declare -i onhold=0 mysecs=0          # timing=0
+       type=${1,,} ; sudo true               # sudo cache update
 
        # nr: #upgraded:#installed:#removable:#kept back
        case ${1,,} in
@@ -760,7 +785,7 @@ function UPDATE_SYSTEM() {
 	   UPGRADABLE nr
 	   mysecs=${nr/#[+(0-9)]:[+(0-9)]:/} ; mysecs=$(( (${mysecs/:*/})*115/100 ))
            ;;
-       *) return 1                                 # type not supported
+       *) return 1                           # type not supported
            ;;
        esac
        printf -v "${2:-fake}" "%s" $nr
@@ -771,7 +796,7 @@ function UPDATE_SYSTEM() {
        BAR::secs $mysecs tuned
        MESSAGE NOTICE "OS updates takes about $(( $tuned/60 + 1 )) minutes."
 
-       if (( ($tuned/60) > 10 ))                    # more as 10 minutes, skip upgrading
+       if (( ($tuned/60) > 10 ))             # more as 10 minutes, skip upgrading
        then
 	       MESSAGE WARNING "Skipping OS updates. Limit is 10 minutes (expect timing is $(($tuned/60))."
 	       MESSAGE NOTICE "Try manual OS update 'sudo apt update ; sudo apt ${type,,}'."
@@ -789,24 +814,24 @@ function UPDATE_SYSTEM() {
        case "${type}" in
 	 upgrade|full-upgrade)
 	   BAR::START "OS ${type^^}:" ${mysecs}
-           LANGUAGE=en ${SUDO:-sudo} stdbuf -o0 apt-get --yes --quiet ${type,,} 2>/dev/null | \
+           LANGUAGE=en ${SUDO:-sudo} apt-get --yes --quiet ${type,,} 2>/dev/null | \
 	       sed -e 's/^\r//' -e 's/\r$//' -e 's/\r/\n/g' | \
 	       APT::show log=OSupgrade priority=NOTICE filter="APT::filter"
 	 ;;
 	 autoremove)
 	   BAR::START "OS ${type^^}:" ${mysecs}
-           LANGUAGE=en stdbuf -oL ${SUDO:-sudo} apt autoremove --yes --quiet 2>/dev/null | \
+           LANGUAGE=en ${SUDO:-sudo} apt autoremove --yes --quiet 2>/dev/null | \
 	       APT::show log=OSupgrade priority=NOTICE filter="APT::filter"
 	 ;;
        esac
-       (( $? > 0 )) && rts=1                   # errors
+       (( $? > 0 )) && rts=1                 # errors
        BAR::STOP # timing
        (( rts == 1 )) && ERRORS OSupgrade && return 1
        #(( ${timing:-0} > $mysecs )) && \
        #    MESSAGE INFO "Increase OS system upgrading algorithm."
 
        UPGRADABLE nr reset >/dev/null
-       printf -v "${2:-fake}" "%s" ${nr/*:/}   # upgraded:installed:remove:kept back
+       printf -v "${2:-fake}" "%s" ${nr/*:/} # upgraded:installed:remove:kept back
        return ${nr/:*/}
    }
 
@@ -814,13 +839,13 @@ function UPDATE_SYSTEM() {
    if ! UPGRADABLE todo
    then
        MESSAGE NOTICE "No OS packages to be updated."
-       return 0                                # if nothing to upgrade return
+       return 0                              # if nothing to upgrade return
    fi
    MESSAGE STATE "Upgrading ${todo/:*} OS system packages"
    # try a basic OS packages update
-   if UPGRADE upgrade todo                     # upgrade basic packages
+   if UPGRADE upgrade todo                   # upgrade basic packages
    then
-       if (( ${todo/*:/} > 0 ))                # pkgs kept back
+       if (( ${todo/*:/} > 0 ))              # pkgs kept back
        then
 	   notice="OS system packages: ${todo/:*/} updated, $(echo ${todo} | cut -d ':' -f 2) installed. ${todo/*:/} packages are kept back."
 	   if UPGRADE full-upgrade todo
@@ -836,11 +861,11 @@ function UPDATE_SYSTEM() {
        then
 	   if UPGRADE autoremove
 	   then notices+=" Removed ${kept} packages." 
-           else rts=1 ; fi                          # autoremove command failed
+           else rts=1 ; fi                   # autoremove command failed
        fi
 
    else
-       rts=1                                        # upgrade command failed
+       rts=1                                 # upgrade command failed
    fi
    if (( ${rts} != 0 ))
    then
@@ -851,13 +876,14 @@ function UPDATE_SYSTEM() {
    then
         MESSAGE NOTICE "${notices}" ; LOGGER NOTICES "${notices}"
    fi
-   rm -f ${TMP_DIR}/OSupgrade                      # clean up update logging
-   UPGRADE_CNT=${todo}                             # update global update state var
-   return 0                                        # next time, try again
+   rm -f ${TMP_DIR}/OSupgrade                # clean up update logging
+   UPGRADE_CNT=${todo}                       # update global update state var
+   return 0                                  # next time, try again
 }
 
 # #######################################################################
 # ******************* services and docker containter definitions ********
+# For some info on docker configuration and commands: see e.g. https://linuxconfig.org/?s=docker
 
 # ***************** docker containers ***********************************
 # default volume options timezone and docker.sock
@@ -874,7 +900,7 @@ declare -A DOCKERS                  # array with container installation details
 DOCKERS[homeassistant]="Home Assistant Systsem (HAS). WebGui on port 8123"
 # container minimal disk space MB initial + operational space
 DOCKERS[homeassistant,MEM]=3200+1000
-DOCKERS[homeassistant,TIME]=174     # measured pull seconds
+DOCKERS[homeassistant,TIME]=400     # measured pull seconds
 # docker container data (home) directory base
 DOCKERS[homeassistant,HOME]=${DOCKERDIR}/homeassistant
 # container image in repository docker
@@ -921,7 +947,7 @@ Homeassistant will add the custom: ${DOCKERS[homeassistant,CUSTOM]// /, /}.
 DOCKERS[zigbee2mqtt]="Zigbee to MQTT gateway service. WebGui on port 8080."
 # container minimal disk space MB initial + operational space
 DOCKERS[zigbee2mqtt,MEM]=200+100
-DOCKERS[zigbee2mqtt,TIME]=12              # measured pull time seconds
+DOCKERS[zigbee2mqtt,TIME]=35              # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[zigbee2mqtt,HOME]=${DOCKERDIR}/zigbee2mqtt
 DOCKERS[zigbee2mqtt,IMAGE]=ghcr.io/koenkk/zigbee2mqtt
@@ -1004,7 +1030,7 @@ Serial dongle Z2M configuration how-to:
 DOCKERS[wud]="Watch's Update Docker service. WebGui on port 3000."
 # container minimal disk space MB initial + operational space
 DOCKERS[wud,MEM]=250+25
-DOCKERS[wud,TIME]=18                      # measured pull time seconds
+DOCKERS[wud,TIME]=85                      # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[wud,HOME]=${DOCKERDIR}/wud
 DOCKERS[wud,IMAGE]=getwud/wud
@@ -1049,7 +1075,7 @@ See: https://getwud.github.io/wud/#/
 DOCKERS[go2rtc]="Video streaming service. WebGui on port 1984."
 # container minimal disk space MB initial + operational space
 DOCKERS[go2rtc,MEM]=260+2
-DOCKERS[go2rtc,TIME]=14                    # measured pull time seconds
+DOCKERS[go2rtc,TIME]=45                    # measured pull time seconds
 # docker container data (home) directory base
 DOCKERS[go2rtc,HOME]=${DOCKERDIR}/go2rtc
 DOCKERS[go2rtc,IMAGE]=alexxit/go2rtc
@@ -1280,19 +1306,20 @@ SERVICES[autofs,CLIENT]=${SMB_CLIENT}
 # check if service on port arg1 is accessable (arg2: also from remote)
 # arg1: port, optional arg2: host (dflt HOSTIP local IP number)
 function LISTENING() {                     # port is accessable?
-    local H=${2:-${HOSTIP}} RTS=0
-    MESSAGE NOTICE "Checking if port $PRT can be accessed. Max wait: 20 secs."
+    local H=${2:-${HOSTIP}} ; declare -i RTS=0 CNT=0
     for PRT in $( echo ${1} | sort | uniq)
     do
-        if ! netcat -w 10 -z $H ${1:-12345} 2>/dev/null
-        then
-            sleep 10                       # wait to allow process to start up
-            if ! netcat -w 10 -z $H ${1:-12345} 2>/dev/null
-	    then
-	       MESSAGE INFO "Port $PRT is not in use by some service."
-	       RTS=1
-	    fi
-         fi
+	for (( CNT=0 ; CNT < 2; CNT++ ))
+	do
+          if netcat -w 10 -z $H ${1:-12345} 2>/dev/null ; then break ; fi
+          sleep 10
+        done
+	if (( CNT >= 2 ))
+	then
+	     MESSAGE INFO "Port $H:$PRT is not in use by some service."
+	     RTS+=1
+	fi
+        MESSAGE INFO "Some service is listening on port $H:$PRT."
     done
     return $RTS
 }
@@ -1819,6 +1846,7 @@ ${Black}TO DO${Reset}:
                  echo "${DOCKERS[$CNTR,AFTER]}"
             fi
             echo -e "Manage docker containers via CLI command:\n  '${Black}docker {ps|restart|stop|status} ${Italic}$CNTR${Reset}'.\nOr use (remote) '${Black}portainer${Reset}' or '${Black}wud${Reset}'."
+	    echo -e "For more information managing docker containers see: https://linuxconfig.org/?s=docker ."
 
         elif echo "${!SERVICES[@]}" | sed 's/[a-z][a-z0-9]*,[A-Z][A-Z]*//g' |  grep -q "${CNTR}"
         then
@@ -2449,7 +2477,7 @@ function ZIGBEE2MQTT_MQTT(){
                 if LISTENING "${PRT}" ${SERVICES[mosquitto,HOST]:-localhost}
                 then
 	             echo "  server: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${PRT}"
-                     MESSAGE INFO "Using MQTT service: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${PRT]}."
+                     MESSAGE INFO "Using MQTT service: mqtt://${SERVICES[mosquitto,HOST]:-localhost}:${PRT}."
                      break
                 fi
             done
@@ -3067,6 +3095,7 @@ function PURGE_APP(){
         do
             if [ ${ONE} = docker ]
             then
+		#${SUDO}docker system prune -a       # clear all stopped docker images
                 if echo $(${SUDO}docker ps --format '{{.ID}}' 2>/dev/null) | grep -q '[a-f0-9]' 
                 then
                     MESSAGE EMERG "Purge first all docker images on this system!" # exit 1
