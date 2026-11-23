@@ -26,7 +26,7 @@
 #   language governing rights and limitations under the RPL.
 
 # Alternative containers? Use Google to find standard docker container installation details.
-VERSION=$(echo  '$Revision: 5.5 $ $Date: 2026/11/02 21:51:16 $' | awk '{ printf("V%s_%s", $2,$5);}')
+VERSION=$(echo  '$Revision: 5.6 $ $Date: 2026/11/23 17:59:39 $' | awk '{ printf("V%s_%s", $2,$5);}')
 #
 #if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then echo "BASH DEBUG MODE" 1>&2 ; fi
 SCRIPT=$(basename $0)
@@ -194,7 +194,7 @@ function CLEANUP() {
   [ -n "$(tty)" ] && tput cud1
   if (( $RTS > 0 ))
   then
-      MESSAGE ERROR "Failed on $RTS packages"
+      MESSAGE FAIL "Failed on $RTS packages"
   # else MESSAGE OK "DONE"
   fi
   if [ "$TMP_LOG" != /dev/null ] && [ -s "$TMP_LOG" ]
@@ -220,12 +220,15 @@ trap INTERRUPTED INT TERM                  # on interupt reset terminal
 
 # log functionj for system usage information
 function LOGGER() {
-    local level=${1:-info}
+    local level=${1:-info} tag=${level}
+    level=${level,,}
+    if ! echo "$level" | grep -q -P '^(emerg|alert|crit|err|warning|notice|info|debug)$'
+    then level=debug ; fi
     function clearESCs() {                 # remove tput coloring
 	sed -e 's/[^[:print:]]\[[0-9;]*m*//g' -e 's/[^[:print:]](B//g'
     }
-    logger --skip-empty --priority user.${level,,} --stderr --no-act \
-	   --tag "${SCRIPT/%\.sh/}.${level,,}" "$(echo -e "$2" | clearESCs)" |& sed 's/^<[0-9]*>//' >>${TMP_LOG}  
+    logger --skip-empty --priority user.${level} --stderr --no-act \
+	   --tag "${SCRIPT/%\.sh/}.${tag}" "$(echo -e "$2" | clearESCs)" |& sed 's/^<[0-9]*>//' >>${TMP_LOG}  
 }
 
 # info and logging handler, be verbose of what is going on
@@ -244,7 +247,6 @@ function MESSAGE() {
 	[ -z "$(tty)" ] && return 0        # no tty: no global messages
         (( ${LEVEL[NOTICE]:-2} < ${LEVEL[$MSG]:-4} )) && return 0
         local COLOR
-	# BAR::printbar " "                # clear window bottum line
         case "${1^^}" in
                 STATE|STATUS) COLOR="$(tput setab 123; tput setaf 0)${Bold}"
                 ;;
@@ -304,7 +306,7 @@ function MESSAGE() {
     if (( ${LEVEL[$1]:-1} >= ${LEVEL[CRIT]:-5} )) # level of critical messages
     then
        CURSOR_POS CURSOR                          # save cursor position for restore
-       MESSAGE ERR "EXITING ON ERRORS"
+       MESSAGE FAIL "EXITING ON ERRORS"
        exit 1
     fi
 }
@@ -416,7 +418,6 @@ function BAR::PRINT() {        # generate title, progress bar, eleapsed secs and
 
    # ending the bar printing loop and subshell process
    trap "" SIGINT SIGTERM
-   #(( cur > (percent*120+step) )) && VAL=4
    (( $(bc <<< "$cursecs > ($secs*1.2)") > 0 )) && VAL=4
    printf -v bar "       Elapsed time: %d seconds" $(( $(date +%s)-timing ))
    sleep 1
@@ -514,12 +515,17 @@ function BAR::secs() {                # calibrate seconds, optional arg2: docker
 	then ARCH+="/$( od --strings /sys/firmware/devicetree/base/model | cut -d ' ' -f 3,4,6)"
 	else ARCH+="/desktop"
 	fi
-        # adjust to RPi model RPi4 (model B)
-        if echo "$ARCH" | grep -q 'Pi 4'              # RPi 4
-	then BARfactor=300
-	elif echo "$ARCH" | grep -q 'x86-64/desktop'  # Intel desktop
-	then BARfactor=100
-	fi
+        # adjust to RPi model RPi (model B) To Do: improve use LOG file
+	case "$ARCH" in
+	Pi?5*)                         # RPi 5 Model B
+	    BARfactor=300 ;;
+        Pi?4*)                         # RPi 4 Model B
+	    BARfactor=300 ;;
+        Pi?3*)                         # RPi 3 Model B
+	    BARfactor=600 ;;
+        x86-64/desktop|*)              # Intel desktop or default 100%
+	    BARfactor=100 ;;
+        esac
 	# script is run with bashdb, increase timing
 	if [ -n "${_Dbg_DEBUGGER_LEVEL}" ] ; then BARfactor=$((2*${BARfactor})) ; fi
         # adjust to internet connectivity
@@ -713,7 +719,7 @@ function APT::show() {
 UPGRADE_CNT=                                 # nr of upgradable packages. Dlft: undefined
 function UPGRADABLE() {
    local CNT="$UPGRADE_CNT" fake=${1:-fake}
-   [ -z "$UPGRADE_CNT}" ] && MESSAGE STATE "Checking OS system for updates"
+   [ -z "${UPGRADE_CNT}" ] && MESSAGE STATE "Checking OS system for updates"
    [ -n "${2}" ] && UPGRADE_CNT=""           # reset count
    if [ -z "$UPGRADE_CNT" ]
    then
@@ -755,13 +761,13 @@ function UPDATE_SYSTEM() {
    declare -i RTS=0 CNT=0
    if [ "$GAWK" = gawk ] && ! which gawk >/dev/null  # check only once, if no gawk try to install it
    then
-        LOGGER NOTICES "Try to install gawk application."
+        LOGGER NOTICE "Try to install gawk application."
 	if ! ${SUDO:-sudo} apt install --yes -qq gawk 2>/dev/null >/dev/null
 	then
             MESSAGE WARN "Unable to install gawk needed by APT::show."
 	    GAWK=cat
 	else
-	    LOGGER NOTICES "Installed gawk application"
+	    LOGGER NOTICE "Installed gawk application"
 	fi
    fi
 
@@ -838,7 +844,7 @@ function UPDATE_SYSTEM() {
    local todo rts=0 notice="OS system packages are up to date."
    if ! UPGRADABLE todo
    then
-       MESSAGE NOTICE "No OS packages to be updated."
+       MESSAGE INFO "No OS packages to be updated."
        return 0                              # if nothing to upgrade return
    fi
    MESSAGE STATE "Upgrading ${todo/:*} OS system packages"
@@ -874,7 +880,7 @@ function UPDATE_SYSTEM() {
    fi
    if [ -n "$notices" ]
    then
-        MESSAGE NOTICE "${notices}" ; LOGGER NOTICES "${notices}"
+        MESSAGE NOTICE "${notices}" ; LOGGER NOTICE "${notices}"
    fi
    rm -f ${TMP_DIR}/OSupgrade                # clean up update logging
    UPGRADE_CNT=${todo}                       # update global update state var
@@ -892,6 +898,8 @@ DEFAULT_OPTIONS="
     --volume=/var/run/docker.sock:/var/run/docker.sock"
 # container installation definitions should be in a sort of library database
 declare -A DOCKERS                  # array with container installation details
+# check integrety of download container images
+export DOCKER_CONTENT_TRUST=1
 
 # ************************** HOMEASSTANT ********************************
 # see also: https://www.homeautomationguy.io/blog/home-assistant-tips/installing-docker-home-assistant-and-portainer-on-ubuntu-linux
@@ -931,7 +939,8 @@ DOCKERS[homeassistant,CMD]=
 DOCKERS[homeassistant,DEP]=mosquitto     # HAS needs mosquitto or mqtt5
 DOCKERS[homeassistant,PREP]="Preparation: Default homeassistant runs as user '${Black}${DOCKERS[homeassistant,USER]}${Reset}'.
 "
-DOCKERS[homeassistant,CUSTOM]="HACS"     # add HACK custom packages
+DOCKERS[homeassistant,CUSTOM]="HACS"     # add HACS custom packages
+DOCKERS[homeassistant,CUSTOM]=""         # from 2026.11 is build in as Marketplace
 DOCKERS[homeassistant,AFTER]="
 The docker container homeassistant will automatically start.
 Login via http://${HOSTIP}:8123  to allow HAS to start search for devices and install integrations.
@@ -1025,6 +1034,13 @@ Serial dongle Z2M configuration how-to:
 
 # default args: --name, --restart, --env TZ, --user, --publish, --volume /var/run/docker.sock
 
+# alternative to wud and maybe portainer: dockercheck
+# see https://github.com/mag37/dockercheck download bash script, check options to use, crontab
+# download:
+# curl -L https://raw.githubusercontent.com/mag37/dockcheck/main/dockcheck.sh -o ~/dockcheck.sh
+# or with wget -O ~/dockcheck.sh "https://raw.githubusercontent.com/mag37/dockcheck/...
+# chmod +x ~/dockcheck.sh
+
 # ************************* WUD *****************************************
 # container WUD (containers automatic update service. WEBgui on 3000 port.)
 DOCKERS[wud]="Watch's Update Docker service. WebGui on port 3000."
@@ -1056,7 +1072,9 @@ DOCKERS[wud,DATA]=/store
 DOCKERS[wud,ENV]="
     --env=TZ=Europe/Amsterdam
     --env=WUD_WATCHER_LOCAL_CRON='15!1!*!*!6'
-    --env=WUD_TRIGGER_DOCKER_LOCAL_PRUNE=true"
+    --env=WUD_TRIGGER_DOCKER_LOCAL_PRUNE=true
+    --env=WUD_AUTH_ADMIN_USER=admin
+    --env=WUD_AUTH_ADMIN_PASSWORD=adminMYpassword" # authentication is required from v9.8.0+
 DOCKERS[wud,CMD]=""
 DOCKERS[wud,PREP]="Preparation: Default wud runs as user '${Black}${DOCKERS[wud,USER]:-anonymous}${Reset}'.
 "
@@ -1066,6 +1084,7 @@ The docker container wud (What's up Docker) will automatically start.
 Login via http://$(HOSTIP):3000.
 ${Red}Security remark: exported port 3000 can make wud remote accessable.
 See: https://getwud.github.io/wud/#/
+Using environment settings: ${DOCKERS[wud,ENV]}
 "
 # default args: --name, --restart, --env TZ, --user, --publish, --volume /var/run/docker.sock
 
@@ -1276,6 +1295,8 @@ SERVICES[mosquitto,CONF]=/etc/mosquitto/conf.d/HAS.conf  # mqtt configuration fi
 # next will be used by optional/alternative MQTT docker container config as well
 # HOST=${HOSTIP:-localhost}            # LAN host for MQTT service
 SERVICES[mosquitto,HOST]=localhost     # default host for MQTT service
+[ -n "$(hostname)" ] && \
+  SERVICES[mosquitto,HOST]=$(hostname) # localhost gives zigbee2mqtt DNS problems
 SERVICES[mosquitto,PORT]="1883 8883"   # default service port 1883, if bridge client: 8883
 SERVICES[mosquitto,BRIDGE]=            # port in case mosquitto is acting as bridge: eg IP:8883
 SERVICES[mosquitto,USER]=mosquitto     # default MQTT service system owner: user:password
@@ -1335,11 +1356,11 @@ function DOCKER_rerun(){
 # correct directory ownership
 # arg1: directory to create, arg2: ownership
 function SET_DIRECTORY() {
-    if ! ${SUDO:-sudo} mkdir -p "$1" || ! ${SUDO:-sudo} chmod 755 "$1"
+    if ! ${SUDO:-sudo} mkdir -p "$1" || ! ${SUDO:-sudo} chmod 775 "$1"
     then
         return 1
     fi
-    if [ -n "$2" ] && ! ${SUDO:-sudo} chown -R "${2}:${2}" "$1" ; then return 1; fi
+    if [ -n "$2" ] && ! ${SUDO:-sudo} chown -R "${2}:docker" "$1" ; then return 1; fi
     return $?
 }
 
@@ -1648,7 +1669,7 @@ function HELP(){
 $SCRIPT script version: $VERSION
 
 How to use this command:
-   ${Black}$0 [--level=LEVEL|--debug|--noprogress|help|default|install|purge|${Italic}container|service ...]${Reset}
+   ${Black}$0 [--level=LEVEL|--debug|--noprogress|help|default|install|update|purge|${Italic}container|service ...]${Reset}
 
 Optional argument:
 '${Black}--level=LEVEL${Reset}' or '${Black}-l=LEVEL${Reset}': level of verbosity.
@@ -1968,7 +1989,7 @@ function CONFIG_DOCKER(){
 function TEST_MOSQUITTO() {
     if ! which mosquitto_sub 2>/dev/null || ! which mosquitto_pub 2>/dev/null
     then
-        MESSAGE ERROR "Unable to test mosquitto: installed MQTT subscribe or publish?"
+        MESSAGE ERR "Unable to test mosquitto: installed MQTT subscribe or publish?"
         return 1
     fi
     function MQTT_sub() {
@@ -2268,7 +2289,7 @@ function ADD_SERVICE(){
     STATUS=$?
     if (( $STATUS == 0 ))
     then
-        INSTALLED[${SRVR}]="${Green}Installed${Reset} system service ${Italic}$SRVR${Reset}."
+        INSTALLED[${SRVR}]="${Green}Installed${Reset} system service ${Italic}${SRVR}${Reset}."
 	[ -n "${SERVICES[$SRVR,PORT]}" ] && INSTALLED[${SRVR}]+=" Port ${Italic}${SERVICES[$SRVR,PORT]}${Reset}."
     else
         MESSAGE SKIPPED "Failed to install system service '${Red}$SRVR${Reset}'. Skipped."
@@ -2278,9 +2299,14 @@ function ADD_SERVICE(){
 }
  
 # **************************************** install a container *************************
+# TO DO add better docker image version check for updates
+#
 # import (pull) Home Assistant docker container image. Arg: container name.
-function INSTALL_CONTAINER(){
-    declare -i CNT=0 rts=0
+function INSTALL_IMAGE(){
+    declare -i CNT=0 rts=0 ; local IMGexists=""
+    if ${SUDO}docker inspect "${DOCKERS[${1},IMAGE]}" 2>/dev/null >/dev/null
+    then IMGexists=yes
+    fi
     if ! CHECK_FREESPACE "${1}" ; then return 5 ; fi   # enouph disk space?
     MESSAGE NOTICE "Check and get latest container '${1}' image '${DOCKERS[${1},IMAGE]}'.\nThis takes some while..."
     # some container repros fail first time, but are succefull second trial. E.g. go2rtc pull image.
@@ -2292,13 +2318,15 @@ function INSTALL_CONTAINER(){
 	local M=$(( ${DOCKERS[${1},MEM]/+*/}*22/400 )) # default 22/400*Mb
 	[ -n "${DOCKERS[${1},TIME]}" ] && M=${DOCKERS[${1},TIME]} # or measured secs
 	BAR::secs "$M" M                               # tune guessed install time
-	(( $M > 600 )) && MESSAGE NOTICE "$1 container installation will take more as $(( $M/60 +1 )) minutes!."
+	(( $M > 600 )) && \
+	   MESSAGE NOTICE "$1 container installation will take more as $(( $M/60 +1 )) minutes!."
 	BAR::START "Pull $1 image:" ${M:-30} DOC
         if ! ${SUDO}docker pull "${DOCKERS[${1},IMAGE]}" 2>&1 | tee ${TMP_DIR}/pull | \
 		grep -P -v '(Download complete|Pulling fs)'
         then                  # some repros e.g. go2rtc have caching problems. Try again.
             BAR::STOP
-	    MESSAGE WARNING "Failure $(( CNT+1 )) to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again?"
+	    (( CNT < 2 )) && \
+		MESSAGE WARNING "Failure $(( CNT+1 )) to pull (try $CNT) image ${DOCKERS[${1},IMAGE]}. Try again"
             ERRORS pull
 	    sleep 5                                    # give server some time
 	    rm -f ${TMP_DIR}/pull
@@ -2307,22 +2335,30 @@ function INSTALL_CONTAINER(){
             break
 	fi
     done
-    (( CNT == 3 )) && return 3
-    if ! [ -s ${TMP_DIR}/pull ]
+    if ! [ -s ${TMP_DIR}/pull ] || (( CNT >= 3 ))
     then
         MESSAGE WARNING "Failed to pull image ${DOCKERS[${1},IMAGE]}. Unknown image?"
 	LOGGER ERR "Failed to pull image ${DOCKERS[${1},IMAGE]}"
         return 3
     fi
-    if grep -q 'up to date' ${TMP_DIR}/pull
+    LOGGER NOTICE "Pulled ${1}: '$(grep Status: ${TMP_DIR}/pull)'."
+    if grep -q -e 'up to date' -e 'Status: Downloaded newer image' ${TMP_DIR}/pull
     then
-        if ${SUDO}docker ps --format '{{.Names}}' | grep -q "${1}"  # is container running?
-        then
-            LOGGER NOTICE "Container image for '${1}' is up to date"
-            rts=1        # still running fine
-	else rts=2       # up to date, but not running
+	if [ -n "$IMGexists" ]
+	then
+            if ${SUDO}docker ps --format '{{.Names}}' | grep -q "${1}"  # is container running?
+            then
+                LOGGER NOTICE "Container image for '${1}' is up to date"
+                rts=1        # still running fine, no upgrade needed
+	    else rts=2       # up to date, but not running
+	    fi
+	else
+	    rts=6            # brand new image
         fi
+    elif grep -q 'Status: Downloaded newer image' ${TMP_DIR}/pull
+    then rts=6           # container image is upgraded
     fi
+    # grep Status: Downloaded newer image for
     rm -f ${TMP_DIR}/pull
     # check if image is uploaded and installed as image
     if ! ${SUDO}docker inspect "${DOCKERS[${1},IMAGE]}" 2>/dev/null >/dev/null
@@ -2398,6 +2434,7 @@ function ARCHIVE(){
 # stop running container. ARG: container name
 function STOP_CONTAINER(){
     local ONE
+    declare -i RTS=0
     for ONE in $@
     do
         if ${SUDO}docker ps --format "{{.Names}}" | grep -q "${ONE}"
@@ -2406,11 +2443,12 @@ function STOP_CONTAINER(){
             if ! ${SUDO}docker stop "${ONE}" >/dev/null
             then
                 MESSAGE WARNING "Unable to stop container '${ONE}'."
+		RTS+=1
                 continue
             fi
         fi
     done
-    return 0  # the container $1 is not running anymore
+    return $RTS  # the container $1 is not running anymore
 }
 
 # #######################################################################
@@ -2421,13 +2459,8 @@ function DELETE_CONTAINER(){
     local CNTR=${1:-None}
     if [ -n "${DOCKERS[$CNTR,USER]/:*/}" ] && grep -q "${DOCKERS[$CNTR,USER]/:*/}:" /etc/passwd
     then
-        MESSAGE NOTICE "Remove user:group ${DOCKERS[$CNTR,USER]} home and local data from system."
-        ${SUDO:-sudo} deluser --quiet --logmsglevel info --remove-home ${DOCKERS[$CNTR,USER]/:*/}
-    fi
-    if [ -d "${DOCKERS[${CNTR},HOME]}" ]
-    then
-        MESSAGE NOTICE "Cleanup and remove ${DOCKERS[${CNTR},HOME]} from the system."
-        ${SUDO:-sudo} rm -rf ${DOCKERS[${CNTR},HOME]}
+        ${SUDO:-sudo} deluser --quiet --remove-home ${DOCKERS[$CNTR,USER]/:*/}
+        MESSAGE WARN "Removed user:group ${DOCKERS[$CNTR,USER]} home and local data from system."
     fi
 }
 
@@ -2489,7 +2522,7 @@ function ZIGBEE2MQTT_MQTT(){
             if [ -n "${SERVICES[mosquitto,CLIENT]/:*/}" ]
             then
                 echo "  user: ${SERVICES[mosquitto,CLIENT]/:*/} "
-                MESSAGE INFO "Zigbee2mqtt MQTT user authorized: ${SERVICES[mosquitto,CLIENT]/:*/}."
+                MESSAGE NOTICE "Zigbee2mqtt MQTT user authorized: ${SERVICES[mosquitto,CLIENT]/:*/}."
             else
 	        echo "  # user: anonimous"
                 MESSAGE WARNING "Zigbee2mqtt MQTT user authorisation anonymous."
@@ -2499,10 +2532,10 @@ function ZIGBEE2MQTT_MQTT(){
             if echo "${SERVICES[mosquitto,CLIENT]}" | grep -q ':' && [ -n "${SERVICES[mosquitto,CLIENT]/*:/}" ]
             then
                echo "  password: ${SERVICES[mosquitto,CLIENT]/:*/}"
-               MESSAGE DEBUG "Zigbee2mqtt MQTT authorisation pwd ${SERVICES[mosquitto,CLIENT]/*:/}."
+               MESSAGE DEBUG "Zigbee2mqtt MQTT authorisation password ${SERVICES[mosquitto,CLIENT]/*:/}."
 	    else
 	       echo "  # password: acacadabra"
-               MESSAGE WARNING "Zigbee2mqtt MQTT authorisation pwd: anonymous!"
+               [ -n "${SERVICES[mosquitto,CLIENT]/:*/}" ] && MESSAGE WARNING "Zigbee2mqtt MQTT authorisation user ${SERVICES[mosquitto,CLIENT]/:*/}: no password!"
             fi
             ;;
         esac
@@ -2565,7 +2598,7 @@ function YAML_MERGE() {
     then
          if ! ${SUDO:-sudo} apt install python3-ruamel.yaml -y 2>/dev/null >/dev/null
          then
-             MESSAGE ERROR "Require ruamel.yaml python lib" "Unable to intall it"
+             MESSAGE ERR "Require ruamel.yaml python lib" "Unable to intall it"
              return 1
 	 else
              MESSAGE INFO "Needed ruamel.yaml python lib: intalled."
@@ -2600,12 +2633,14 @@ function ZIGBEE2MQTT_CONF() {
     local INF=${1}                                  # only HELPINFO? PRT only
     local CONF=${DOCKERS[zigbee2mqtt,DATA]/:*/}
     local TYPE BRATE RTSCTS DBG=${DEBUG/?*/debug}
+    local DEVDISCOVERY=true                          # sets home asstsatant device discovery
+    MESSAGE INFO "Home Assistant device discovery: ${DEVDISCOVERY:-turned off}."
     CONF=${DOCKERS[zigbee2mqtt,HOME]}/${CONF/\/*\//}/configuration.yaml
     if ! [ -s ${CONF} ]
     then                                            # create a default config yaml file
         ZIGBEE2MQTT_DFLT ${TMP_DIR}/dflt-conf.yaml  # get default config file
 	# define local configuration.yaml changes
-        if echo "${DOCKERS[zigbee2mqtt,DEVICE]}" | grep -q -P "(Sonoff_Zigbee)"
+        if ls /dev/serial/by-id 2>/dev/null | grep -q -P "(Sonoff_Zigbee)"
         then
             BRATE=115200 ; RTSCTS=false             #elif NaBu dflt: BRATE=460800 RTSCTS=true
         fi
@@ -2616,8 +2651,8 @@ frontend:
   port: 8080
 # Home Assistant integration (MQTT discovery)
 homeassistant:
-  enabled: false
-# MQTT local settings
+  enabled: ${DEVDISCOVERY:-false}
+  # MQTT local settings (do not use localhost: connect problems)
 mqtt:
   base_topic: zigbee2mqtt
 $(ZIGBEE2MQTT_MQTT server user password)
@@ -2710,6 +2745,19 @@ function GET_DONGLE(){
      return $rts
 }
 
+# BlueTooth error recovery, reset
+# integration HAS: https://www.youtube.com/watch?v=ZXvcdI3mQuA
+function ResetBlueTooth() {
+    bluetoothctl power off
+    ${SUDO:-sudo} systemctl stop bluetooth
+    ${SUDO:-sudo} rfkill block bluetooth
+    ${SUDO:-sudo} rfkill unblock bluetooth
+    ${SUDO:-sudo} systemctl start bluetooth
+    sleep 1
+    ${SUDO:-sudo} bluetoothctl power on
+    return $?
+}
+
 # Container may have a prepaired and updated own configuration startup file
 # arg1: container name, arg2: if defined only for HELP info
 function CONFIG_CHECK(){
@@ -2777,15 +2825,16 @@ function RESTORE() {
     Z=$(${SUDO:-sudo} file -z ${FILE})
     if ! echo "$Z" | grep -q "POSIX tar"                 # wonder how this can be generalized
     then
-	MESSAGE ERROR "Container archive file $FILE" "format not supported"
+	MESSAGE ERR "Container archive file $FILE" "format not supported"
 	return 1
     fi
-    ${SUDO}docker rm ${CNTR}
     if ! ${SUDO:-sudo} tar --directory="${DOCKERS[${CNTR},HOME]}" ${DEBUG/*/-tv} -xf $FILE
     then
-	MESSAGE WARNING "Unable to retrieve archived file $FILE for container $CNTR. Restart container."
+	MESSAGE ERR "Unable to retrieve archived file $FILE for container $CNTR. Restart container."
 	${SUDO}docker restart $CNTR >/dev/null
 	return 1
+    else
+        ${SUDO}docker rm ${CNTR} >/dev/null
     fi
     MESSAGE WARNING "Installed archived or config file $FILE for container ${CNTR}."
     return 0
@@ -2811,14 +2860,29 @@ function ADD_CONTAINER(){
     UPDATE_SYSTEM                                        # make sure OS system is up to date
 
     # check if image is installed. If not install/pull it from repository 
-    INSTALL_CONTAINER "${CNTR}"
+    INSTALL_IMAGE "${CNTR}"
     case $? in
+     6)
+	 ${SUDO:-sudo} rm -f ${DOCKERS[$CNTR,HOME]}/compose.yaml  # remove generated yaml config
+         if [ -s ${DOCKERS[$CNTR,HOME]}/setup.sh ]
+         then
+	     if ! bash ${DOCKERS[$CNTR,HOME]}/setup.sh
+	     then
+		 MESSAGE ERR "Failed to restart updated conrainer ${CNTR}."
+		 return 1
+	     fi
+             MESSAGE NOTICE "Container image '${CNTR}' is updated and restarted."
+	     LOGGER NOTICE "Updated and restarted docker container ${CNTR}."
+	     return 0
+	 fi
+         # TO DO: check if container config needs to be changed
+     ;;
      5)
-	 MESSAGE ERROR "Not enough disk space for container '${CNTR}'" "Skipped"
+	 MESSAGE ERR "Not enough disk space for container '${CNTR}'" "Skipped"
          return 1
      ;;	 
      4)
-         MESSAGE ERROR "Invalid container '${CNTR}' image"
+         MESSAGE ERR "Invalid container '${CNTR}' image"
          return 1
      ;;
      3)
@@ -2826,7 +2890,8 @@ function ADD_CONTAINER(){
          return 1
      ;;
      2)
-         MESSAGE INFO "Container image '${CNTR}' is now updated."
+         MESSAGE INFO "Container image '${CNTR}' is up to date, but not active.."
+	 INSTALLED[$CNTR]+="Updated docker container"
          if systemctl --quiet is-active docker              # just restart container
          then
              if ${SUDO}docker ps --format '{{.Names}}' | grep -q "${CNTR}"
@@ -2834,7 +2899,7 @@ function ADD_CONTAINER(){
                  MESSAGE INFO "Restart docker container ${CNTR}."
                  if ! ${SUDO}docker restart "${CNTR}" >/dev/null
 		 then
-		     MESSAGE ERROR "Failed to restart updated container ${CNTR}."
+		     MESSAGE ERR "Failed to restart updated container ${CNTR}."
                      return $?
 		 fi   
              fi
@@ -2848,6 +2913,7 @@ function ADD_CONTAINER(){
          # TO DO: check if container config needs to be changed
      ;;
      *)
+	 ${SUDO:-sudo} rm -f ${DOCKERS[$CNTR,HOME]}/compose.yaml  # remove generated yaml config
          MESSAGE INFO "Installed container image ${DOCKERS[${CNTR},IMAGE]} for '${CNTR}'."
      ;;
     esac
@@ -2930,7 +2996,7 @@ function ADD_CONTAINER(){
     # inform user about effective user of the container
     if [ -n "${DOCKERS[${CNTR},USER]/:*/}" ]   # ownership problems? See zigbee2mqtt dongle notes!
     then
-         MESSAGE NOTICE "Container '$CNTR' uses group $(groups ${DOCKERS[${CNTR},USER]/:*/} | sed -e 's/:/with/' -e 's/users/as user/')."
+         MESSAGE NOTICE "Container '$CNTR' uses user $(groups ${DOCKERS[${CNTR},USER]/:*/} | sed -e 's/:/and is member of groups/' -e 's/ users//')."
     else
          MESSAGE NOTICE "Container '${CNTR}' will run as user '${DOCKERS[${CNTR},USER]:-anonymous}'."
     fi
@@ -2941,17 +3007,32 @@ function ADD_CONTAINER(){
 # create a new docker container ${CNTR}
 # created from script ${SCRIPT} on $(date +%Y-%m-%dT%H:%M) by $USER
 # Use envirionment variable DEBUG=log to run in interactive logging modus. Default: detached.
-# Use environment variable DEBUG=bash to run in interactive bash commands modus.
-DEBUG=$DEBUG       # for logging and bash interactive modus.
+echo "Use environment variable DEBUG=bash to run ${CNTR} in interactive modus." 1>&2
+DEBUG=\$DEBUG       # for logging and bash interactive modus.
 if grep -q -P "^docker:.*[:,]$USER(,.*)*$" /etc/group ; then SUDO= ; else SUDO="sudo " ; fi
 if \${SUDO}docker ps --all --format 'table {{.Names}}' | grep -q ${CNTR}
-then    # if container is available, remove it
-    echo "Container ${CNTR} is already available! Container is stopped and removed."
+then
+    echo "Container ${CNTR} is already available! Container is stopped and removed." 1>&2
     \${SUDO}docker stop ${CNTR} 2>/dev/null >/dev/null # if running stop it
     \${SUDO}docker rm ${CNTR} 2>/dev/null >/dev/null
 fi
 # Run container '${CNTR}' command:"  or use docker compose.yaml file
-if [ -f "${DOCKERS[$CNTR,HOME]}/compose.yaml" ]
+function generateYAML() {
+    [ -s "${DOCKERS[$CNTR,HOME]}/compose.yaml"  ] && return 0
+    sleep 1
+    if ${SUDO}docker compose alpha generate ${CNTR} 2>/dev/null >${DOCKERS[$CNTR,HOME]}/compose.yaml
+    then
+        # set listening IP address:port to any IPV4
+        sed -i \
+                -e "/host_ip:/s/invalid IP/0.0.0.0/" \
+                -e "/${CNTR}:/s//&\\\\n    container_name: ${CNTR}/" \
+                ${DOCKERS[$CNTR,HOME]}/compose.yaml
+        echo "Created docker (experimental) compose file: ${DOCKERS[$CNTR,HOME]}/compose.yaml" >&2
+    else return 1
+    fi
+}
+
+if [ -s "${DOCKERS[$CNTR,HOME]}/compose.yaml" ]
 then
     MODUS=--detach=true
     if [ -n "\$DEBUG" ]
@@ -2975,8 +3056,15 @@ else
     \${SUDO} docker run \$MODUS \\
 EOF
     # collect  and add docker run command options
+    # last line run cmd is image?
     CMD_RUN_CNTR ${CNTR}  | awk '{ printf("    %s \\\n",$0);}' >>${TMP_DIR}/run_command
-    echo -e '    ${DEBUG/log*/}\nfi' >>${TMP_DIR}/run_command  # last line is image?
+    cat >>${TMP_DIR}/run_command <<EOF
+    \${DEBUG/log*/}
+fi
+if ! generateYAML
+then echo "Unable to generate compose.yaml config file" >&2
+fi
+EOF
 
     # START the docker container
     if ${SUDO}docker ps --all --format 'table {{.Names}}' | grep -q ${CNTR}
@@ -2991,16 +3079,18 @@ EOF
 
     if ! ${SUDO}bash ${DEBUG/[0-9a-zA-Z]*/-x} $TMP_DIR/run_command >/dev/null 2>>$VERBOSE
     then
-         MESSAGE ERROR "Failed to start running '$CNTR' container"
+         MESSAGE ERR "Failed to start running '$CNTR' container"
 	 MESSAGE NOTICE "Try 'docker stop $CNTR', 'docker rm $CNTR' to clean up.
-   CLI logging for cause: try setup.sh script in $CTNTR home directory
+   CLI logging for cause: try setup.sh script in $CNTR home directory
        with run options: --interactive --tty
-       without run options: --detach and --restart.
+       without run options: --detach and --restart. Delete compose.yaml file.
        And stop/remove the container (docker rm ${CNTR}).
     Or clean up with 'sh $SCRIPT purge ${CNTR}'."
 	 rm -f $TMP_DIR/run_command
          STATUS+=1
     else
+        MESSAGE INFO "Created docker container ${CNTR} setup.sh CLI in directory DOCKERS[$CNTR,HOME]."
+        MESSAGE INFO "Created docker (experimental) compose file: DOCKERS[$CNTR,HOME]/compose.yaml"
 	for PRT in $PTRS                        # exported ports remotely available?
 	do
             if [ -n "$PRT" ] && ! LISTENING "$PRT" REMOTE 
@@ -3009,25 +3099,13 @@ EOF
 	        STATUS+=1
 	    fi
         done
-	chmod +x ${TMP_DIR}/run_command
+	chmod ug+x ${TMP_DIR}/run_command
 	${SUDO:-sudo} mv --force ${TMP_DIR}/run_command ${DOCKERS[$CNTR,HOME]}/setup.sh
 	${SUDO:-sudo} chown root:docker ${DOCKERS[$CNTR,HOME]}/setup.sh
         MESSAGE DEBUG "Run container '${CNTR}' CLI command: ${DOCKERS[$CNTR,HOME]}/setup.sh"
     fi
     rm -f $TMP_DIR/run_command
 
-    # generate docker compose file for docker compose up -f compose.yml -d
-    if ${SUDO}docker compose alpha generate ${CNTR} 2>/dev/null >${TMP_DIR}/compose.yaml
-    then
-	# set listening IP address:port to any IPV4
-	sed -i \
-		-e "/host_ip:/s/invalid IP/0.0.0.0/" \
-		-e "/${CNTR}:/s//&\\n    container_name: ${CNTR}/" \
-		${TMP_DIR}/compose.yaml
-	${SUDO:-sudo} mv --force ${TMP_DIR}/compose.yaml ${DOCKERS[$CNTR,HOME]}/compose.yaml
-	${SUDO:-sudo} chown root:docker ${DOCKERS[$CNTR,HOME]}/compose.yaml
-	MESSAGE NOTICE "Created docker (experimental) compose file: DOCKERS[$CNTR,HOME]/compose.yaml"
-    fi
     MESSAGE NOTICE "Created and running docker container ${Blue}$CNTR${Reset}."
     MESSAGE NOTICE "Exported ports:${Blue}${PRTS:- None}${Reset}."
     PRT=${DOCKERS[$CNTR,USER]/:/, GUID }
@@ -3038,7 +3116,7 @@ EOF
     MESSAGE NOTICE "Container runs with effective user: ${PRT:-${Blue}anonymous${Reset}}."
     if (( $STATUS == 0 ))
     then
-	INSTALLED[${CNTR}]="${Green}Installed${Reset} container ${Black}$CNTR${Reset}, effective user ${Italic}${PRT:-anonymous}${Reset}, port(s): ${Italic}${PRTS:-None}${Reset}."
+	INSTALLED[${CNTR}]="${Green}Installed${Reset} container ${Black}$CNTR${Reset},\neffective user ${Italic}${PRT:-anonymous}${Reset}, homedirectory ${DOCKERS[$CNTR,HOME]},\n port(s): ${Italic}${PRTS:-None}${Reset}."
 	LOGGER NOTICE "Docker container '${CNTR}' successfully installed and started."
     else
 	INSTALLED[${CNTR}]="${Red}Failed${Reset} to install container ${Italic}$CNTR${Reset}."
@@ -3194,10 +3272,11 @@ function ADD_CNTRcustom() {
 	    notice="Installed addon '$one' for container '$cntr'"
 	    case ${cntr}_${one} in
 	    homeassistant_HACS)        # homeassistant addon HACS
+		# HACS is from 2026.11 build in
 		if [ -d ${DOCKERS[$cntr,HOME]}/config/custom_components/hacs/repositories ]
 		then
-		    notice "HACS is already installed. Skip addon installation"
-		    MESSAGE WARN "${notice}."
+		   notice "HACS is already installed. Skip addon installation"
+		   MESSAGE WARN "${notice}."
 		    continue
 		fi
 		if ${SUDO}docker stop homeassistant 2>/dev/null >/dev/null
@@ -3341,7 +3420,7 @@ do                                             # maintenance actions
                 then
 	            if ! ARCHIVE ${F}
 	            then
-	                 MESSAGE ERROR "Failed to archive data of ${F} container(s)."
+	                 MESSAGE FAIL "Failed to archive data of ${F} container(s)."
 	                 exit 1
 	            else
 			 MESSAGE OK "$1 local data of container ${F}"
@@ -3444,7 +3523,7 @@ then
     for ITEM in ${CONTAINERS}                    # ****** docker containers handling
     do
        declare -i BEFORE AFTER
-       MESSAGE STATE "Installing docker container ${ITEM}"
+       MESSAGE STATE "Installing docker container ${Black}${ITEM}"
        CHECK_FREESPACE "${ITEM}" BEFORE
        if ! ADD_CONTAINER "${ITEM,,}"
        then
